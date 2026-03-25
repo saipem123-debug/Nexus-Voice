@@ -1,0 +1,21 @@
+{
+  "name": "Nexus Justice Hybrid",
+  "short_name": "Nexus Justice",
+  "description": "Hybrid Legal Portal with On-Device AI and Auto-Answer Dialer",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#6366f1",
+  "icons": [
+    {
+      "src": "https://picsum.photos/seed/nexus/192/192",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://picsum.photos/seed/nexus/512/512",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
