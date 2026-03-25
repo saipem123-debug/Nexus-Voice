@@ -37,8 +37,36 @@ export class HybridAIEngine {
     }
   }
 
-  public async generateResponse(prompt: string, history: AIMessage[], imageBase64?: string): Promise<string> {
-    // Choice 1: Built-in AI (Chrome AI / Gemini Nano)
+  private async callSarvam(prompt: string, history: AIMessage[]): Promise<string> {
+    const apiKey = process.env.SARVAM_API_KEY;
+    if (!apiKey) return "Sarvam API Key not configured.";
+
+    try {
+      const response = await axios.post('https://api.sarvam.ai/v1/chat/completions', {
+        model: "sarvam-30b",
+        messages: [
+          { role: "system", content: "You are a high-complexity legal reasoning engine for the Nexus Justice portal." },
+          ...history,
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.1
+      }, {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      });
+      return response.data.choices[0].message.content;
+    } catch (err) {
+      console.error("Sarvam AI failed:", err);
+      return "High-complexity reasoning failed. Falling back to Gemini.";
+    }
+  }
+
+  public async generateResponse(prompt: string, history: AIMessage[], imageBase64?: string, highComplexity: boolean = false): Promise<string> {
+    // Choice 1: High-Complexity Backend (Sarvam 30B)
+    if (navigator.onLine && highComplexity && process.env.SARVAM_API_KEY) {
+      return await this.callSarvam(prompt, history);
+    }
+
+    // Choice 2: Built-in AI (Chrome AI / Gemini Nano)
     // Note: Current window.ai is text-only. If image is provided, we might need fallback or description.
     if (this.hasBuiltInAI && !imageBase64) {
       try {
