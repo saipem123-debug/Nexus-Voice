@@ -92,6 +92,8 @@ export default function AdvocatePortal() {
   const [aiStatus, setAiStatus] = useState<any>({});
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [showOnboarding, setShowOnboarding] = useState(true);
+  const [installingBrain, setInstallingBrain] = useState(false);
+  const [installProgress, setInstallProgress] = useState(0);
 
   // AI Engine & DB
   const aiEngine = HybridAIEngine.getInstance();
@@ -480,6 +482,7 @@ export default function AdvocatePortal() {
     { id: 'reading-room', label: 'Read', icon: "M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
     { id: 'doc-converter', label: 'Convert', icon: "M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" },
     { id: 'writing-desk', label: 'Writing', icon: "M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" },
+    { id: 'config', label: 'Config', icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0" },
   ];
 
   const S = {
@@ -641,13 +644,41 @@ export default function AdvocatePortal() {
                         <button onClick={() => setVoiceAiOn(!voiceAiOn)} style={{ flex: 1, padding: '8px 0', background: voiceAiOn ? '#ef4444' : '#6366f1', border: 'none', borderRadius: 8, color: '#fff', fontSize: 10, fontWeight: 900 }}>{voiceAiOn ? 'Stop' : 'Start'}</button>
                         <button 
                           onClick={() => {
-                            localStorage.setItem('offline_brain_installed', 'true');
-                            setAiStatus(aiEngine.getStatus());
-                            alert("Offline Brain (Gemma 3-1B-it) simulated as installed. To use it for real, install Ollama locally.");
+                            if (aiStatus.offlineBrain) return;
+                            setInstallingBrain(true);
+                            setInstallProgress(0);
+                            const interval = setInterval(() => {
+                              setInstallProgress(prev => {
+                                if (prev >= 100) {
+                                  clearInterval(interval);
+                                  localStorage.setItem('offline_brain_installed', 'true');
+                                  setAiStatus(aiEngine.getStatus());
+                                  setInstallingBrain(false);
+                                  alert("Offline Brain (Gemma 3-1B-it) installed successfully. Note: This is a simulation. For real local inference, install Ollama.");
+                                  return 100;
+                                }
+                                return prev + 5;
+                              });
+                            }, 100);
                           }} 
-                          style={{ flex: 1, padding: '8px 0', background: aiStatus.offlineBrain ? 'rgba(16,185,129,.1)' : 'rgba(245,158,11,.1)', border: aiStatus.offlineBrain ? '1px solid rgba(16,185,129,.3)' : '1px solid rgba(245,158,11,.3)', borderRadius: 8, color: aiStatus.offlineBrain ? '#10b981' : '#f59e0b', fontSize: 10, fontWeight: 900 }}
+                          disabled={installingBrain}
+                          style={{ 
+                            flex: 1, 
+                            padding: '8px 0', 
+                            background: aiStatus.offlineBrain ? 'rgba(16,185,129,.1)' : installingBrain ? 'rgba(255,255,255,.05)' : 'rgba(245,158,11,.1)', 
+                            border: aiStatus.offlineBrain ? '1px solid rgba(16,185,129,.3)' : '1px solid rgba(245,158,11,.3)', 
+                            borderRadius: 8, 
+                            color: aiStatus.offlineBrain ? '#10b981' : '#f59e0b', 
+                            fontSize: 10, 
+                            fontWeight: 900,
+                            position: 'relative',
+                            overflow: 'hidden'
+                          }}
                         >
-                          {aiStatus.offlineBrain ? 'Brain Ready' : 'Download Brain'}
+                          {installingBrain ? `Installing ${installProgress}%` : aiStatus.offlineBrain ? 'Brain Ready' : 'Install Brain'}
+                          {installingBrain && (
+                            <div style={{ position: 'absolute', bottom: 0, left: 0, height: 2, background: '#f59e0b', width: `${installProgress}%`, transition: 'width 0.1s' }} />
+                          )}
                         </button>
                       </div>
                       
@@ -771,6 +802,102 @@ export default function AdvocatePortal() {
                           <div style={{ fontSize: 9, color: '#475569' }}>{call.timestamp}</div>
                         </div>
                       ))}
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* CONFIG */}
+            {view === 'config' && (
+              <motion.div key="config" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', overflowY: 'auto', padding: 24 }}>
+                <h2 style={{ fontSize: 32, fontWeight: 900, fontStyle: 'italic', marginBottom: 24 }}>System Configuration</h2>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: 20 }}>
+                  <div style={S.card}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+                      <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(245,158,11,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f59e0b' }}>
+                        <Download size={20} />
+                      </div>
+                      <div>
+                        <h3 style={{ fontSize: 16, fontWeight: 900 }}>Offline Brain Facility</h3>
+                        <p style={{ fontSize: 11, color: '#475569' }}>Local legal AI installation</p>
+                      </div>
+                    </div>
+                    
+                    <div style={{ background: 'rgba(255,255,255,.02)', borderRadius: 16, padding: 20, border: '1px solid rgba(255,255,255,.05)' }}>
+                      <div style={{ marginBottom: 16 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Status: {aiStatus.offlineBrain ? 'Installed' : 'Not Installed'}</div>
+                        <p style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5 }}>
+                          The Offline Brain (Gemma 3-1B-it) allows you to process legal queries without an internet connection. 
+                          This is essential for high-privacy consultations.
+                        </p>
+                      </div>
+                      
+                      {installingBrain ? (
+                        <div style={{ marginBottom: 16 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, fontWeight: 900, marginBottom: 6, textTransform: 'uppercase' }}>
+                            <span>Downloading Brain Assets...</span>
+                            <span>{installProgress}%</span>
+                          </div>
+                          <div style={{ height: 6, background: 'rgba(255,255,255,.05)', borderRadius: 3, overflow: 'hidden' }}>
+                            <div style={{ height: '100%', background: '#f59e0b', width: `${installProgress}%`, transition: 'width 0.1s' }} />
+                          </div>
+                        </div>
+                      ) : aiStatus.offlineBrain ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#10b981', fontSize: 12, fontWeight: 700 }}>
+                          <CheckCircle size={16} /> Brain is ready for offline use.
+                        </div>
+                      ) : (
+                        <button 
+                          onClick={() => {
+                            setInstallingBrain(true);
+                            setInstallProgress(0);
+                            const interval = setInterval(() => {
+                              setInstallProgress(prev => {
+                                if (prev >= 100) {
+                                  clearInterval(interval);
+                                  localStorage.setItem('offline_brain_installed', 'true');
+                                  setAiStatus(aiEngine.getStatus());
+                                  setInstallingBrain(false);
+                                  alert("Offline Brain installed successfully.");
+                                  return 100;
+                                }
+                                return prev + 5;
+                              });
+                            }, 100);
+                          }}
+                          style={{ width: '100%', padding: '14px', background: '#f59e0b', border: 'none', borderRadius: 12, color: '#000', fontWeight: 900, fontSize: 13, cursor: 'pointer' }}
+                        >
+                          Install Brain Now
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={S.card}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+                      <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6366f1' }}>
+                        <Shield size={20} />
+                      </div>
+                      <div>
+                        <h3 style={{ fontSize: 16, fontWeight: 900 }}>Privacy & Security</h3>
+                        <p style={{ fontSize: 11, color: '#475569' }}>Data handling preferences</p>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: 12 }}>Local Database Encryption</span>
+                        <div style={{ width: 32, height: 18, borderRadius: 9, background: '#10b981', position: 'relative' }}>
+                          <div style={{ position: 'absolute', top: 2, right: 2, width: 14, height: 14, borderRadius: '50%', background: '#fff' }} />
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: 12 }}>Cloud Sync</span>
+                        <div style={{ width: 32, height: 18, borderRadius: 9, background: '#1e293b', position: 'relative' }}>
+                          <div style={{ position: 'absolute', top: 2, left: 2, width: 14, height: 14, borderRadius: '50%', background: '#fff' }} />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
