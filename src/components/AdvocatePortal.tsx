@@ -145,6 +145,9 @@ export default function AdvocatePortal() {
   const [activeEngine, setActiveEngine] = useState('');
   const [camOn, setCamOn] = useState(false);
   const recognitionRef = useRef<any>(null);
+  const isStartingRef = useRef(false);
+  const silenceTimerRef = useRef<any>(null);
+  const [voiceAiLang, setVoiceAiLang] = useState<'en-IN' | 'ml-IN'>('en-IN');
 
   // Knowledge Base
   const [kbDocs, setKbDocs] = useState<any[]>([
@@ -168,6 +171,8 @@ export default function AdvocatePortal() {
   const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
   const [incomingCall, setIncomingCall] = useState<any>(null);
   const [isAnswering, setIsAnswering] = useState(false);
+
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
 
   // --- Initialization ---
   useEffect(() => {
@@ -193,6 +198,13 @@ export default function AdvocatePortal() {
     };
     init();
 
+    const loadVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      setAvailableVoices(voices);
+    };
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+
     const handleOnline = () => setIsOffline(false);
     const handleOffline = () => setIsOffline(true);
     window.addEventListener('online', handleOnline);
@@ -200,6 +212,7 @@ export default function AdvocatePortal() {
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      window.speechSynthesis.onvoiceschanged = null;
     };
   }, []);
 
@@ -328,100 +341,10 @@ export default function AdvocatePortal() {
   };
 
   // --- Voice AI Logic ---
+  const chatHistoryRef = useRef(chatHistory);
   useEffect(() => {
-    if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking) {
-      const timer = setTimeout(() => {
-        if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking) {
-          try { recognitionRef.current?.start(); } catch(e) {}
-        }
-      }, 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [voiceAiOn, voiceAiListening, voiceAiThinking, voiceAiSpeaking]);
-
-  const startVoiceAi = useCallback(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("Speech recognition not supported in this browser.");
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-
-    recognition.onstart = () => {
-      setVoiceAiListening(true);
-      setVoiceAiTranscript('');
-      voiceAiTranscriptRef.current = '';
-    };
-
-    recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
-        .map((result: any) => result[0])
-        .map((result: any) => result.transcript)
-        .join('');
-      setVoiceAiTranscript(transcript);
-      voiceAiTranscriptRef.current = transcript;
-    };
-
-    recognition.onend = () => {
-      setVoiceAiListening(false);
-      const finalTranscript = voiceAiTranscriptRef.current;
-      if (finalTranscript.trim()) {
-        processVoiceCommand(finalTranscript);
-      } else if (voiceAiOn) {
-        // If nothing was heard but voice is still on, restart listening after a short delay
-        setTimeout(() => {
-          if (voiceAiOn && !voiceAiSpeaking && !voiceAiThinking) {
-            try { recognition.start(); } catch(e) {}
-          }
-        }, 1000);
-      }
-    };
-
-    recognition.onerror = (event: any) => {
-      console.error("Speech recognition error", event.error);
-      setVoiceAiListening(false);
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
-  }, [voiceAiOn]); // Removed voiceAiTranscript dependency to avoid recreation
-
-  const processVoiceCommand = async (text: string) => {
-    setView('consult'); // Switch to consult tab automatically
-    setVoiceAiThinking(true);
-    setVoiceAiTranscript(''); // Clear transcript immediately
-    voiceAiTranscriptRef.current = '';
-    setVoiceAiReply(''); // Clear previous reply
-    setActiveEngine('');
-    try {
-      let imageBase64 = undefined;
-      if (camOn && videoRef.current) {
-        const canvas = document.createElement('canvas');
-        canvas.width = videoRef.current.videoWidth;
-        canvas.height = videoRef.current.videoHeight;
-        canvas.getContext('2d')?.drawImage(videoRef.current, 0, 0);
-        imageBase64 = canvas.toDataURL('image/jpeg');
-      }
-
-      const response = await aiEngine.generateResponse(text, chatHistory, imageBase64);
-      setVoiceAiReply(response.text);
-      setActiveEngine(response.engine);
-      setChatHistory(prev => [...prev, { role: 'user', content: text }, { role: 'assistant', content: response.text }]);
-      speakResponse(response.text);
-    } catch (err) {
-      console.error(err);
-      const errorMsg = "I encountered an error processing your request.";
-      setVoiceAiReply(errorMsg);
-      setActiveEngine('Error');
-      speakResponse(errorMsg);
-    } finally {
-      setVoiceAiThinking(false);
-    }
-  };
+    chatHistoryRef.current = chatHistory;
+  }, [chatHistory]);
 
   const sanitizeForSpeech = (text: string) => {
     return text
@@ -438,28 +361,202 @@ export default function AdvocatePortal() {
       .trim();
   };
 
-  const speakResponse = (text: string) => {
-    // Cancel any ongoing speech
+  const speakResponse = useCallback((text: string) => {
+    if (!text) return;
+    
+    // Force reset of speech synthesis to prevent "two voices"
+    window.speechSynthesis.pause();
     window.speechSynthesis.cancel();
+    window.speechSynthesis.resume();
+    
+    // Set speaking state immediately
+    setVoiceAiSpeaking(true);
     
     const cleanText = sanitizeForSpeech(text);
     const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.onstart = () => setVoiceAiSpeaking(true);
+    
+    // Detect Malayalam characters (\u0D00-\u0D7F)
+    const hasMalayalam = /[\u0D00-\u0D7F]/.test(text);
+    const lang = hasMalayalam ? 'ml-IN' : 'en-US';
+    utterance.lang = lang;
+
+    // Try to find a consistent voice to avoid male/female mixup
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(v => v.lang.startsWith(lang) && (v.name.includes('Female') || v.name.includes('Google') || v.name.includes('Samantha'))) 
+                         || voices.find(v => v.lang.startsWith(lang));
+    
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+    }
+
+    utterance.onstart = () => {
+      setVoiceAiSpeaking(true);
+    };
     utterance.onend = () => {
       setVoiceAiSpeaking(false);
-      // After speaking, restart listening if voice mode is still active
-      if (voiceAiOn && recognitionRef.current) {
-        try {
-          recognitionRef.current.start();
-        } catch (e) {
-          console.warn("Could not restart recognition:", e);
-        }
-      }
+    };
+    utterance.onerror = (e) => {
+      console.error("Speech synthesis error:", e);
+      setVoiceAiSpeaking(false);
     };
     window.speechSynthesis.speak(utterance);
-  };
+  }, []);
+
+  const processVoiceCommand = useCallback(async (text: string) => {
+    if (!text.trim()) return;
+
+    setView('consult'); // Switch to consult tab automatically
+    setVoiceAiThinking(true);
+    
+    // Add user message to history immediately so it shows up in the UI
+    setChatHistory(prev => [...prev, { role: 'user', content: text }]);
+    
+    // Ensure the transcript stays visible in the dock while thinking
+    setVoiceAiTranscript(text);
+    voiceAiTranscriptRef.current = '';
+    
+    setVoiceAiReply(''); 
+    setActiveEngine('');
+    try {
+      let imageBase64 = undefined;
+      if (camOn && videoRef.current) {
+        const canvas = document.createElement('canvas');
+        canvas.width = videoRef.current.videoWidth;
+        canvas.height = videoRef.current.videoHeight;
+        canvas.getContext('2d')?.drawImage(videoRef.current, 0, 0);
+        imageBase64 = canvas.toDataURL('image/jpeg');
+      }
+
+      const response = await aiEngine.generateResponse(text, chatHistoryRef.current, imageBase64);
+      
+      // Now clear the transcript only when we have the reply
+      setVoiceAiTranscript('');
+      setVoiceAiReply(response.text);
+      setActiveEngine(response.engine);
+      setChatHistory(prev => [...prev, { role: 'assistant', content: response.text }]);
+      speakResponse(response.text);
+    } catch (err) {
+      console.error(err);
+      const errorMsg = "I encountered an error processing your request.";
+      setVoiceAiTranscript('');
+      setVoiceAiReply(errorMsg);
+      setActiveEngine('Error');
+      speakResponse(errorMsg);
+    } finally {
+      setVoiceAiThinking(false);
+    }
+  }, [camOn, speakResponse]);
+
+  const startVoiceAi = useCallback(() => {
+    if (isStartingRef.current) return;
+    
+    // Clean up existing if any
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.onstart = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.abort();
+      } catch (e) {}
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      console.warn("Speech recognition not supported in this browser.");
+      return;
+    }
+
+    isStartingRef.current = true;
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true; // Changed to true for better multi-word capture
+    recognition.interimResults = true;
+    recognition.lang = voiceAiLang;
+
+    recognition.onstart = () => {
+      isStartingRef.current = false;
+      setVoiceAiListening(true);
+      setVoiceAiTranscript('');
+      voiceAiTranscriptRef.current = '';
+    };
+
+    recognition.onresult = (event: any) => {
+      const transcript = Array.from(event.results)
+        .map((result: any) => result[0])
+        .map((result: any) => result.transcript)
+        .join('');
+      setVoiceAiTranscript(transcript);
+      voiceAiTranscriptRef.current = transcript;
+
+      // Silence detection: if we get a result, reset the timer
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = setTimeout(() => {
+        if (recognitionRef.current) {
+          recognitionRef.current.stop();
+        }
+      }, 2000); // 2 seconds of silence triggers processing
+    };
+
+    recognition.onend = () => {
+      isStartingRef.current = false;
+      setVoiceAiListening(false);
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      
+      const finalTranscript = voiceAiTranscriptRef.current;
+      if (finalTranscript.trim()) {
+        processVoiceCommand(finalTranscript);
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      isStartingRef.current = false;
+      
+      if (event.error === 'aborted') {
+        console.log("Speech recognition aborted (normal lifecycle).");
+      } else if (event.error === 'not-allowed') {
+        console.error("Speech recognition error: not-allowed");
+        alert("Microphone access was denied. Please check your browser settings.");
+        setVoiceAiOn(false);
+      } else if (event.error === 'network') {
+        console.warn("Network error in speech recognition.");
+      } else if (event.error === 'no-speech') {
+        console.log("No speech detected.");
+      } else {
+        console.error("Speech recognition error:", event.error);
+      }
+      
+      setVoiceAiListening(false);
+    };
+
+    recognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch (e) {
+      isStartingRef.current = false;
+      console.warn("Recognition start failed:", e);
+      setVoiceAiListening(false);
+    }
+  }, [processVoiceCommand, voiceAiLang]);
+
+  useEffect(() => {
+    if (voiceAiOn && recognitionRef.current && voiceAiListening) {
+      recognitionRef.current.abort();
+    }
+  }, [voiceAiLang]);
+
+  useEffect(() => {
+    if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isStartingRef.current) {
+      const timer = setTimeout(() => {
+        if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isStartingRef.current) {
+          startVoiceAi();
+        }
+      }, 1500); // Increased delay slightly for stability
+      return () => clearTimeout(timer);
+    }
+  }, [voiceAiOn, voiceAiListening, voiceAiThinking, voiceAiSpeaking, startVoiceAi]);
 
   const stopVoiceAi = () => {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     if (recognitionRef.current) {
       recognitionRef.current.stop();
     }
@@ -935,10 +1032,15 @@ export default function AdvocatePortal() {
                   <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 14 }}>
                     {chatHistory.map((msg, i) => (
                       <div key={i} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                        <div style={{ maxWidth: '80%', padding: '13px 17px', borderRadius: 20, background: msg.role === 'user' ? 'rgba(99,102,241,.15)' : 'rgba(255,255,255,.04)', border: `1px solid ${msg.role === 'user' ? 'rgba(99,102,241,.3)' : 'rgba(255,255,255,.07)'}`, fontSize: 13, lineHeight: 1.7 }}>
+                        <div style={{ maxWidth: '80%', padding: '13px 17px', borderRadius: 20, background: msg.role === 'user' ? 'rgba(99,102,241,.15)' : 'rgba(255,255,255,.04)', border: `1px solid ${msg.role === 'user' ? 'rgba(99,102,241,.3)' : 'rgba(255,255,255,.07)'}`, fontSize: 13, lineHeight: 1.7, position: 'relative' }}>
                           <div className="markdown-body">
                             <ReactMarkdown>{msg.content}</ReactMarkdown>
                           </div>
+                          {msg.role === 'assistant' && (
+                            <button onClick={() => speakResponse(msg.content)} title="Read aloud" style={{ position: 'absolute', bottom: 4, right: 8, background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1', opacity: 0.4 }}>
+                              <Volume2 size={12} />
+                            </button>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -1142,15 +1244,34 @@ export default function AdvocatePortal() {
                   <span style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
                     {voiceAiListening ? 'Listening...' : voiceAiThinking ? 'Thinking...' : voiceAiSpeaking ? 'Speaking...' : 'Nexus AI Ready'}
                   </span>
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+                    <button 
+                      onClick={() => setVoiceAiLang('en-IN')}
+                      style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: voiceAiLang === 'en-IN' ? '#6366f1' : 'rgba(255,255,255,0.05)', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 900 }}
+                    >
+                      EN
+                    </button>
+                    <button 
+                      onClick={() => setVoiceAiLang('ml-IN')}
+                      style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: voiceAiLang === 'ml-IN' ? '#6366f1' : 'rgba(255,255,255,0.05)', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 900 }}
+                    >
+                      ML
+                    </button>
+                  </div>
                 </div>
                 {voiceAiTranscript && (
-                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 8, fontStyle: 'italic', borderLeft: '2px solid rgba(255,255,255,0.1)', paddingLeft: 8 }}>
-                    "{voiceAiTranscript}"
+                  <div style={{ fontSize: 13, color: '#fff', marginTop: 12, fontStyle: 'italic', borderLeft: '3px solid #6366f1', paddingLeft: 12, background: 'rgba(99,102,241,0.1)', padding: '8px 12px', borderRadius: '0 8px 8px 0' }}>
+                    <span style={{ color: '#6366f1', fontWeight: 900, marginRight: 6, fontSize: 10, textTransform: 'uppercase' }}>Captured:</span> {voiceAiTranscript}
                   </div>
                 )}
                 {voiceAiReply && (
-                  <div className="markdown-body" style={{ fontSize: 11, marginTop: 8 }}>
-                    <ReactMarkdown>{voiceAiReply}</ReactMarkdown>
+                  <div style={{ position: 'relative' }}>
+                    <div className="markdown-body" style={{ fontSize: 11, marginTop: 8, paddingRight: 24 }}>
+                      <ReactMarkdown>{voiceAiReply}</ReactMarkdown>
+                    </div>
+                    <button onClick={() => speakResponse(voiceAiReply)} style={{ position: 'absolute', top: 8, right: 0, background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
+                      <Volume2 size={14} />
+                    </button>
                   </div>
                 )}
                 {voiceAiThinking && !voiceAiReply && (

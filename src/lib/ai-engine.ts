@@ -14,8 +14,9 @@ export class HybridAIEngine {
 
   private constructor() {
     this.checkBuiltInAI();
-    if (process.env.GEMINI_API_KEY) {
-      this.genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY;
+    if (apiKey) {
+      this.genAI = new GoogleGenAI({ apiKey });
     }
   }
 
@@ -113,6 +114,7 @@ export class HybridAIEngine {
       // Choice 4: Online Multimodal (Gemini 3 Flash)
       if (navigator.onLine && this.genAI) {
         try {
+          console.log("Attempting online AI generation...");
           const contents = [
             ...history.map(m => ({
               role: m.role === 'assistant' ? 'model' : 'user',
@@ -138,10 +140,13 @@ export class HybridAIEngine {
             // @ts-ignore
             contents: contents
           });
+          console.log("Online AI response received.");
           return { text: response.text || "No response from AI.", engine: 'Gemini 3 Flash' };
         } catch (err) {
-          console.error("Online AI failed:", err);
+          console.error("Online AI failed, falling back to local/mock:", err);
         }
+      } else {
+        console.log("Skipping online AI: online=", navigator.onLine, "genAI=", !!this.genAI);
       }
 
       // Choice 5: Mock Offline Brain (Fallback)
@@ -149,12 +154,21 @@ export class HybridAIEngine {
       if (hasOfflineBrain) {
         if (imageBase64) {
           return { 
-            text: "Offline Brain (Gemma 3-1B-it): I can see the document clearly. It appears to be a legal notice. [Offline Vision Mode]", 
+            text: `Offline Brain (Gemma 3-1B-it): I have analyzed the document you provided. It appears to be a legal document related to your query: "${prompt}". I am processing this locally for your privacy. [Offline Vision Mode]`, 
             engine: 'Gemma 3-1B-it (Mock)' 
           };
         }
+        
+        // Simple heuristic for "answering" common questions in mock mode
+        let mockReply = `Offline Brain (Gemma 3-1B-it): I am processing your request locally regarding "${prompt}". [Offline Mode]`;
+        if (prompt.toLowerCase().includes('hello') || prompt.toLowerCase().includes('hi')) {
+          mockReply = "Offline Brain (Gemma 3-1B-it): Hello! I am your local legal assistant. How can I help you today? [Offline Mode]";
+        } else if (prompt.toLowerCase().includes('malayalam')) {
+          mockReply = "Offline Brain (Gemma 3-1B-it): I can understand Malayalam, but my current offline brain is optimized for English legal reasoning. Please connect to the internet for full multilingual support. [Offline Mode]";
+        }
+
         return { 
-          text: "Offline Brain (Gemma 3-1B-it): I am processing your request locally. [Offline Mode]", 
+          text: mockReply, 
           engine: 'Gemma 3-1B-it (Mock)' 
         };
       }
