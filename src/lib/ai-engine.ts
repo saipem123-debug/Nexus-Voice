@@ -60,70 +60,112 @@ export class HybridAIEngine {
     }
   }
 
-  public async generateResponse(prompt: string, history: AIMessage[], imageBase64?: string, highComplexity: boolean = false): Promise<string> {
-    // Choice 1: High-Complexity Backend (Sarvam 30B)
-    if (navigator.onLine && highComplexity && process.env.SARVAM_API_KEY) {
-      return await this.callSarvam(prompt, history);
+  private async callLocalOllama(prompt: string, history: AIMessage[]): Promise<string | null> {
+    try {
+      const response = await axios.post('http://localhost:11434/api/chat', {
+        model: "gemma:2b", // Or gemma:1.1b-it if using Gemma 1/2, or gemma3:1b if available
+        messages: [
+          { role: "system", content: "You are a local legal assistant running on the Nexus Justice portal. You are offline." },
+          ...history.map(m => ({ role: m.role, content: m.content })),
+          { role: "user", content: prompt }
+        ],
+        stream: false
+      }, { timeout: 5000 });
+      return response.data.message.content;
+    } catch (err) {
+      console.warn("Local Ollama not found or failed:", err);
+      return null;
     }
+  }
 
-    // Choice 2: Built-in AI (Chrome AI / Gemini Nano)
-    // Note: Current window.ai is text-only. If image is provided, we might need fallback or description.
-    if (this.hasBuiltInAI && !imageBase64) {
-      try {
-        if (!this.builtInSession) {
-          // @ts-ignore
-          this.builtInSession = await window.ai.createTextSession();
-        }
-        return await this.builtInSession.prompt(prompt);
-      } catch (err) {
-        console.warn("Built-in AI failed, falling back...", err);
+  public async generateResponse(prompt: string, history: AIMessage[], imageBase64?: string, highComplexity: boolean = false): Promise<{ text: string, engine: string }> {
+    const timeout = new Promise<{ text: string, engine: string }>((_, reject) => 
+      setTimeout(() => reject(new Error("AI Engine Timeout")), 15000)
+    );
+
+    const execute = async (): Promise<{ text: string, engine: string }> => {
+      // Choice 1: High-Complexity Backend (Sarvam 30B)
+      if (navigator.onLine && highComplexity && process.env.SARVAM_API_KEY) {
+        const text = await this.callSarvam(prompt, history);
+        return { text, engine: 'Sarvam 30B' };
       }
-    }
 
-    // Choice 2: Online Multimodal (Gemini 3 Flash)
-    if (navigator.onLine && this.genAI) {
-      try {
-        const contents = [
-          ...history.map(m => ({
-            role: m.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: m.content }]
-          })),
-          {
-            role: 'user',
-            parts: [
-              { text: prompt },
-              ...(imageBase64 ? [{
-                inlineData: {
-                  mimeType: "image/jpeg",
-                  data: imageBase64.split(',')[1]
-                }
-              }] : [])
-            ]
+      // Choice 2: Local Ollama (Real Offline Brain)
+      const localResponse = await this.callLocalOllama(prompt, history);
+      if (localResponse) {
+        return { text: localResponse, engine: 'Gemma 3-1B-it (Local)' };
+      }
+
+      // Choice 3: Built-in AI (Chrome AI / Gemini Nano)
+      if (this.hasBuiltInAI && !imageBase64) {
+        try {
+          if (!this.builtInSession) {
+            // @ts-ignore
+            this.builtInSession = await window.ai.createTextSession();
           }
-        ];
+          const text = await this.builtInSession.prompt(prompt);
+          return { text, engine: 'Gemini Nano (Built-in)' };
+        } catch (err) {
+          console.warn("Built-in AI failed, falling back...", err);
+        }
+      }
 
-        // @ts-ignore
-        const response = await this.genAI.models.generateContent({
-          model: "gemini-3-flash-preview",
+      // Choice 4: Online Multimodal (Gemini 3 Flash)
+      if (navigator.onLine && this.genAI) {
+        try {
+          const contents = [
+            ...history.map(m => ({
+              role: m.role === 'assistant' ? 'model' : 'user',
+              parts: [{ text: m.content }]
+            })),
+            {
+              role: 'user',
+              parts: [
+                { text: prompt },
+                ...(imageBase64 ? [{
+                  inlineData: {
+                    mimeType: "image/jpeg",
+                    data: imageBase64.split(',')[1]
+                  }
+                }] : [])
+              ]
+            }
+          ];
+
           // @ts-ignore
-          contents: contents
-        });
-        return response.text || "No response from AI.";
-      } catch (err) {
-        console.error("Online AI failed:", err);
+          const response = await this.genAI.models.generateContent({
+            model: "gemini-3-flash-preview",
+            // @ts-ignore
+            contents: contents
+          });
+          return { text: response.text || "No response from AI.", engine: 'Gemini 3 Flash' };
+        } catch (err) {
+          console.error("Online AI failed:", err);
+        }
       }
-    }
 
-    // Choice 3: Offline Brain (Gemma 3-1B-it)
-    const hasOfflineBrain = localStorage.getItem('offline_brain_installed') === 'true';
-    if (hasOfflineBrain) {
-      if (imageBase64) {
-        return "Offline Brain (Gemma 3-1B-it): I can see the document clearly. It appears to be a legal notice. [Offline Vision Mode]";
+      // Choice 5: Mock Offline Brain (Fallback)
+      const hasOfflineBrain = localStorage.getItem('offline_brain_installed') === 'true';
+      if (hasOfflineBrain) {
+        if (imageBase64) {
+          return { 
+            text: "Offline Brain (Gemma 3-1B-it): I can see the document clearly. It appears to be a legal notice. [Offline Vision Mode]", 
+            engine: 'Gemma 3-1B-it (Mock)' 
+          };
+        }
+        return { 
+          text: "Offline Brain (Gemma 3-1B-it): I am processing your request locally. [Offline Mode]", 
+          engine: 'Gemma 3-1B-it (Mock)' 
+        };
       }
-      return "Offline Brain (Gemma 3-1B-it): I am processing your request locally. [Offline Mode]";
-    }
 
-    return "I am currently offline and no local brain is installed. Please connect to the internet or download the Offline Brain.";
+      return { 
+        text: "I am currently offline and no local brain is installed. Please connect to the internet or download the Offline Brain.", 
+        engine: 'None' 
+      };
+    };
+
+    return Promise.race([execute(), timeout]);
   }
 
   public getStatus() {

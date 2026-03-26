@@ -138,7 +138,9 @@ export default function AdvocatePortal() {
   const [voiceAiThinking, setVoiceAiThinking] = useState(false);
   const [voiceAiSpeaking, setVoiceAiSpeaking] = useState(false);
   const [voiceAiTranscript, setVoiceAiTranscript] = useState('');
+  const voiceAiTranscriptRef = useRef('');
   const [voiceAiReply, setVoiceAiReply] = useState('');
+  const [activeEngine, setActiveEngine] = useState('');
   const [camOn, setCamOn] = useState(false);
   const recognitionRef = useRef<any>(null);
 
@@ -209,7 +211,7 @@ export default function AdvocatePortal() {
 
     try {
       const response = await aiEngine.generateResponse(text, chatHistory);
-      setChatHistory(prev => [...prev, { role: 'assistant', content: response }]);
+      setChatHistory(prev => [...prev, { role: 'assistant', content: response.text }]);
     } catch (err) {
       console.error(err);
     } finally {
@@ -226,7 +228,7 @@ export default function AdvocatePortal() {
 
     try {
       const response = await aiEngine.generateResponse(text, []);
-      setDeskChatHistory(prev => [...prev, { role: 'ai', text: response }]);
+      setDeskChatHistory(prev => [...prev, { role: 'ai', text: response.text }]);
     } catch (err) {
       console.error(err);
     } finally {
@@ -309,7 +311,7 @@ export default function AdvocatePortal() {
         [], 
         imageBase64
       );
-      setScannedText(response);
+      setScannedText(response.text);
       setScanPhase('done');
       setScanProgress(100);
     } catch (err) {
@@ -324,6 +326,17 @@ export default function AdvocatePortal() {
   };
 
   // --- Voice AI Logic ---
+  useEffect(() => {
+    if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking) {
+      const timer = setTimeout(() => {
+        if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking) {
+          try { recognitionRef.current?.start(); } catch(e) {}
+        }
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [voiceAiOn, voiceAiListening, voiceAiThinking, voiceAiSpeaking]);
+
   const startVoiceAi = useCallback(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -339,6 +352,7 @@ export default function AdvocatePortal() {
     recognition.onstart = () => {
       setVoiceAiListening(true);
       setVoiceAiTranscript('');
+      voiceAiTranscriptRef.current = '';
     };
 
     recognition.onresult = (event: any) => {
@@ -347,15 +361,21 @@ export default function AdvocatePortal() {
         .map((result: any) => result.transcript)
         .join('');
       setVoiceAiTranscript(transcript);
+      voiceAiTranscriptRef.current = transcript;
     };
 
-    recognition.onend = async () => {
+    recognition.onend = () => {
       setVoiceAiListening(false);
-      if (voiceAiTranscript.trim()) {
-        processVoiceCommand(voiceAiTranscript);
+      const finalTranscript = voiceAiTranscriptRef.current;
+      if (finalTranscript.trim()) {
+        processVoiceCommand(finalTranscript);
       } else if (voiceAiOn) {
-        // Restart if still on but no transcript
-        // recognition.start(); 
+        // If nothing was heard but voice is still on, restart listening after a short delay
+        setTimeout(() => {
+          if (voiceAiOn && !voiceAiSpeaking && !voiceAiThinking) {
+            try { recognition.start(); } catch(e) {}
+          }
+        }, 1000);
       }
     };
 
@@ -366,10 +386,15 @@ export default function AdvocatePortal() {
 
     recognitionRef.current = recognition;
     recognition.start();
-  }, [voiceAiTranscript, voiceAiOn]);
+  }, [voiceAiOn]); // Removed voiceAiTranscript dependency to avoid recreation
 
   const processVoiceCommand = async (text: string) => {
+    setView('consult'); // Switch to consult tab automatically
     setVoiceAiThinking(true);
+    setVoiceAiTranscript(''); // Clear transcript immediately
+    voiceAiTranscriptRef.current = '';
+    setVoiceAiReply(''); // Clear previous reply
+    setActiveEngine('');
     try {
       let imageBase64 = undefined;
       if (camOn && videoRef.current) {
@@ -380,23 +405,53 @@ export default function AdvocatePortal() {
         imageBase64 = canvas.toDataURL('image/jpeg');
       }
 
-      const response = await aiEngine.generateResponse(text, [], imageBase64);
-      setVoiceAiReply(response);
-      speakResponse(response);
+      const response = await aiEngine.generateResponse(text, chatHistory, imageBase64);
+      setVoiceAiReply(response.text);
+      setActiveEngine(response.engine);
+      setChatHistory(prev => [...prev, { role: 'user', content: text }, { role: 'assistant', content: response.text }]);
+      speakResponse(response.text);
     } catch (err) {
       console.error(err);
+      const errorMsg = "I encountered an error processing your request.";
+      setVoiceAiReply(errorMsg);
+      setActiveEngine('Error');
+      speakResponse(errorMsg);
     } finally {
       setVoiceAiThinking(false);
     }
   };
 
+  const sanitizeForSpeech = (text: string) => {
+    return text
+      .replace(/(\*\*|__)(.*?)\1/g, '$2')
+      .replace(/(\*|_)(.*?)\1/g, '$2')
+      .replace(/#{1,6}\s+/g, '')
+      .replace(/>\s+/g, '')
+      .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+      .replace(/`{1,3}[^`]*`{1,3}/g, '')
+      .replace(/^\s*[-*+]\s+/gm, '')
+      .replace(/^\s*\d+\.\s+/gm, '')
+      .replace(/\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
   const speakResponse = (text: string) => {
-    const utterance = new SpeechSynthesisUtterance(text);
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel();
+    
+    const cleanText = sanitizeForSpeech(text);
+    const utterance = new SpeechSynthesisUtterance(cleanText);
     utterance.onstart = () => setVoiceAiSpeaking(true);
     utterance.onend = () => {
       setVoiceAiSpeaking(false);
-      if (voiceAiOn) {
-        // Optionally restart listening
+      // After speaking, restart listening if voice mode is still active
+      if (voiceAiOn && recognitionRef.current) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {
+          console.warn("Could not restart recognition:", e);
+        }
       }
     };
     window.speechSynthesis.speak(utterance);
@@ -456,6 +511,17 @@ export default function AdvocatePortal() {
         .kb-drop.over{border-color:#6366f1;background:rgba(99,102,241,.05)}
         .instr-card{transition:all .2s}
         .instr-card:hover{border-color:rgba(245,158,11,.2)!important}
+        .markdown-body h1, .markdown-body h2, .markdown-body h3 { font-weight: 900; font-style: italic; margin-top: 1.2em; margin-bottom: 0.6em; color: #6366f1; letter-spacing: -0.02em; }
+        .markdown-body h1 { font-size: 1.5em; }
+        .markdown-body h2 { font-size: 1.3em; }
+        .markdown-body h3 { font-size: 1.1em; }
+        .markdown-body p { margin-bottom: 1.2em; line-height: 1.8; color: #cbd5e1; }
+        .markdown-body ul, .markdown-body ol { margin-bottom: 1.2em; padding-left: 1.2em; list-style-position: outside; }
+        .markdown-body li { margin-bottom: 0.6em; color: #cbd5e1; }
+        .markdown-body strong { color: #f59e0b; font-weight: 900; }
+        .markdown-body blockquote { border-left: 3px solid #6366f1; padding-left: 1.2em; color: #64748b; font-style: italic; margin: 1.5em 0; background: rgba(99,102,241,0.03); padding-top: 8px; padding-bottom: 8px; border-radius: 0 8px 8px 0; }
+        .markdown-body code { background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.9em; color: #818cf8; }
+        .markdown-body hr { border: 0; border-top: 1px solid rgba(255,255,255,0.05); margin: 2em 0; }
       `}</style>
 
       {/* SIDEBAR */}
@@ -573,7 +639,16 @@ export default function AdvocatePortal() {
                       </div>
                       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
                         <button onClick={() => setVoiceAiOn(!voiceAiOn)} style={{ flex: 1, padding: '8px 0', background: voiceAiOn ? '#ef4444' : '#6366f1', border: 'none', borderRadius: 8, color: '#fff', fontSize: 10, fontWeight: 900 }}>{voiceAiOn ? 'Stop' : 'Start'}</button>
-                        <button style={{ flex: 1, padding: '8px 0', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, color: '#94a3b8', fontSize: 10, fontWeight: 900 }}>Config</button>
+                        <button 
+                          onClick={() => {
+                            localStorage.setItem('offline_brain_installed', 'true');
+                            setAiStatus(aiEngine.getStatus());
+                            alert("Offline Brain (Gemma 3-1B-it) simulated as installed. To use it for real, install Ollama locally.");
+                          }} 
+                          style={{ flex: 1, padding: '8px 0', background: aiStatus.offlineBrain ? 'rgba(16,185,129,.1)' : 'rgba(245,158,11,.1)', border: aiStatus.offlineBrain ? '1px solid rgba(16,185,129,.3)' : '1px solid rgba(245,158,11,.3)', borderRadius: 8, color: aiStatus.offlineBrain ? '#10b981' : '#f59e0b', fontSize: 10, fontWeight: 900 }}
+                        >
+                          {aiStatus.offlineBrain ? 'Brain Ready' : 'Download Brain'}
+                        </button>
                       </div>
                       
                       {/* Auto Answer Toggle */}
@@ -734,11 +809,20 @@ export default function AdvocatePortal() {
                     {chatHistory.map((msg, i) => (
                       <div key={i} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
                         <div style={{ maxWidth: '80%', padding: '13px 17px', borderRadius: 20, background: msg.role === 'user' ? 'rgba(99,102,241,.15)' : 'rgba(255,255,255,.04)', border: `1px solid ${msg.role === 'user' ? 'rgba(99,102,241,.3)' : 'rgba(255,255,255,.07)'}`, fontSize: 13, lineHeight: 1.7 }}>
-                          <ReactMarkdown>{msg.content}</ReactMarkdown>
+                          <div className="markdown-body">
+                            <ReactMarkdown>{msg.content}</ReactMarkdown>
+                          </div>
                         </div>
                       </div>
                     ))}
-                    {consoleLoading && <div className="flex gap-2 p-4"><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" /><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-100" /><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-200" /></div>}
+                    {voiceAiTranscript && (
+                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                        <div style={{ maxWidth: '80%', padding: '13px 17px', borderRadius: 20, background: 'rgba(99,102,241,.05)', border: '1px solid rgba(99,102,241,.1)', fontSize: 13, lineHeight: 1.7, opacity: 0.6 }}>
+                          <span className="italic">"{voiceAiTranscript}"</span>
+                        </div>
+                      </div>
+                    )}
+                    {(consoleLoading || voiceAiThinking) && <div className="flex gap-2 p-4"><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" /><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-100" /><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-200" /></div>}
                   </div>
                   <div style={{ display: 'flex', gap: 10 }}>
                     <input value={consoleInput} onChange={e => setConsoleInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendConsult()} placeholder="Ask anything legal..." style={{ flex: 1, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 14, padding: '13px 18px' }} />
@@ -915,14 +999,51 @@ export default function AdvocatePortal() {
             {voiceAiOn && (
               <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} style={{ background: 'rgba(0,0,0,.9)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 24, padding: '12px 20px', minWidth: 280, boxShadow: '0 20px 50px rgba(0,0,0,.5)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <div className="flex gap-1">
-                    {[0,1,2].map(i => <div key={i} style={{ width: 3, height: 12, background: '#6366f1', borderRadius: 2, animation: `waveBar 0.5s ease-in-out ${i*0.1}s infinite alternate` }} />)}
+                  <div style={{ display: 'flex', gap: 3, alignItems: 'center', height: 12 }}>
+                    {[0,1,2].map(i => (
+                      <motion.div 
+                        key={i} 
+                        animate={{ 
+                          height: (voiceAiListening || voiceAiSpeaking) ? [4, 12, 4] : 4,
+                          opacity: (voiceAiListening || voiceAiSpeaking || voiceAiThinking) ? 1 : 0.3
+                        }} 
+                        transition={{ repeat: Infinity, duration: 0.6, delay: i*0.1 }} 
+                        style={{ width: 3, background: '#6366f1', borderRadius: 2 }} 
+                      />
+                    ))}
                   </div>
-                  <span style={{ fontSize: 10, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                    {voiceAiListening ? 'Listening...' : 'Nexus AI Ready'}
+                  <span style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                    {voiceAiListening ? 'Listening...' : voiceAiThinking ? 'Thinking...' : voiceAiSpeaking ? 'Speaking...' : 'Nexus AI Ready'}
                   </span>
                 </div>
-                {voiceAiTranscript && <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 8, fontStyle: 'italic' }}>"{voiceAiTranscript}"</div>}
+                {voiceAiTranscript && (
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 8, fontStyle: 'italic', borderLeft: '2px solid rgba(255,255,255,0.1)', paddingLeft: 8 }}>
+                    "{voiceAiTranscript}"
+                  </div>
+                )}
+                {voiceAiReply && (
+                  <div className="markdown-body" style={{ fontSize: 11, marginTop: 8 }}>
+                    <ReactMarkdown>{voiceAiReply}</ReactMarkdown>
+                  </div>
+                )}
+                {voiceAiThinking && !voiceAiReply && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      {[0,1,2].map(i => <motion.div key={i} animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: i*0.2 }} style={{ width: 6, height: 6, borderRadius: '50%', background: '#6366f1' }} />)}
+                    </div>
+                    <span style={{ fontSize: 10, color: '#6366f1', fontWeight: 600 }}>Nexus is thinking...</span>
+                  </div>
+                )}
+                <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
+                    Engine: {activeEngine || (isOffline || aiStatus.offlineBrain ? 'Gemma 3-1B-it' : aiStatus.builtIn ? 'Gemini Nano' : 'Gemini 3 Flash')}
+                  </span>
+                  {(voiceAiReply || voiceAiThinking) && (
+                    <button onClick={() => { setVoiceAiReply(''); setVoiceAiThinking(false); setActiveEngine(''); }} style={{ fontSize: 8, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase', background: 'none', border: 'none', cursor: 'pointer' }}>
+                      Reset
+                    </button>
+                  )}
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
@@ -938,6 +1059,7 @@ export default function AdvocatePortal() {
               } else {
                 setVoiceAiOn(true);
                 startVoiceAi();
+                setView('consult'); // Switch to consult tab when starting voice AI
               }
             }} style={{ width: 56, height: 56, borderRadius: '50%', background: voiceAiOn ? '#ef4444' : '#6366f1', border: 'none', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.3s', transform: voiceAiOn ? 'scale(1.1)' : 'scale(1)' }}>
               <Mic size={24} />
