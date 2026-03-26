@@ -551,6 +551,17 @@ export default function AdvocatePortal() {
               <motion.div key="command" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', gap: 24, padding: 24, overflow: 'hidden' }}>
                 <div style={{ width: 320, display: 'flex', flexDirection: 'column', gap: 16, flexShrink: 0 }}>
                   <div style={S.card}>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 32, marginBottom: 16, opacity: 0.8 }}>
+                      {[0.4, 0.7, 0.5, 0.9, 0.6, 0.8, 0.4, 0.7, 0.5, 0.9, 0.6, 0.8, 0.4, 0.7, 0.5, 0.9, 0.6, 0.8].map((h, i) => (
+                        <div key={i} style={{ 
+                          flex: 1, 
+                          borderRadius: 1, 
+                          background: '#f59e0b', 
+                          height: `${h * 100}%`, 
+                          animation: `waveBar ${0.5 + (i % 3) * 0.2}s ease-in-out ${i * 0.05}s infinite alternate` 
+                        }} />
+                      ))}
+                    </div>
                     <div style={{ color: '#f59e0b', fontSize: 9, fontWeight: 900, letterSpacing: '0.3em', textTransform: 'uppercase', marginBottom: 6 }}>Hybrid AI Node</div>
                     <h3 style={{ fontSize: 28, fontWeight: 900, fontStyle: 'italic', letterSpacing: '-0.03em', marginBottom: 16 }}>Command<span style={{ color: '#475569' }}>Center</span></h3>
                     
@@ -587,11 +598,6 @@ export default function AdvocatePortal() {
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 40, marginBottom: 16 }}>
-                      {Array.from({ length: 18 }).map((_, i) => (
-                        <div key={i} style={{ flex: 1, borderRadius: 2, background: `rgba(245,158,11,${0.2 + Math.random() * 0.6})`, height: `${20 + Math.random() * 70}%`, animation: `waveBar ${0.4 + Math.random() * 0.5}s ease-in-out ${i * 0.06}s infinite alternate` }} />
-                      ))}
-                    </div>
                     <div style={{ fontSize: 9, color: '#334155', fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase' }}>System: {aiStatus.builtIn ? 'Local Brain' : 'Cloud Brain'}</div>
                   </div>
 
