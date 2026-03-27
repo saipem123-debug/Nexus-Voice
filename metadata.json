@@ -1,6 +1,6 @@
 {
   "name": "Nexus Justice Hybrid",
-  "description": "Hybrid Legal Portal with On-Device Gemma 3-1B-it and Backend Sarvam 30B",
+  "description": "Hybrid Legal Portal with On-Device Gemma 3n and Backend Sarvam 30B",
   "requestFramePermissions": [
     "camera",
     "microphone"

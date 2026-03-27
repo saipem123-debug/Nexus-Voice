@@ -94,6 +94,7 @@ export default function AdvocatePortal() {
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [installingBrain, setInstallingBrain] = useState(false);
   const [installProgress, setInstallProgress] = useState(0);
+  const [installSlice, setInstallSlice] = useState(0);
 
   // AI Engine & DB
   const aiEngine = HybridAIEngine.getInstance();
@@ -139,15 +140,117 @@ export default function AdvocatePortal() {
   const [voiceAiListening, setVoiceAiListening] = useState(false);
   const [voiceAiThinking, setVoiceAiThinking] = useState(false);
   const [voiceAiSpeaking, setVoiceAiSpeaking] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [voiceAiTranscript, setVoiceAiTranscript] = useState('');
   const voiceAiTranscriptRef = useRef('');
   const [voiceAiReply, setVoiceAiReply] = useState('');
+  const isSpeakingRef = useRef(false);
   const [activeEngine, setActiveEngine] = useState('');
   const [camOn, setCamOn] = useState(false);
   const recognitionRef = useRef<any>(null);
   const isStartingRef = useRef(false);
+  const [voicesLoaded, setVoicesLoaded] = useState(false);
+
+  // Initialize voices
+  useEffect(() => {
+    const loadVoices = () => {
+      const v = window.speechSynthesis.getVoices();
+      if (v.length > 0) {
+        setVoicesLoaded(true);
+      }
+    };
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
   const silenceTimerRef = useRef<any>(null);
   const [voiceAiLang, setVoiceAiLang] = useState<'en-IN' | 'ml-IN'>('en-IN');
+  const [micActivity, setMicActivity] = useState(0);
+  const [micError, setMicError] = useState<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+
+  const [showVoiceHelp, setShowVoiceHelp] = useState(false);
+
+  const startMonitoring = async () => {
+    if (audioContextRef.current) return;
+    try {
+      setMicError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+      analyser.fftSize = 256;
+      audioContextRef.current = audioContext;
+      analyserRef.current = analyser;
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      const updateActivity = () => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / bufferLength;
+        setMicActivity(average);
+        requestAnimationFrame(updateActivity);
+      };
+      updateActivity();
+    } catch (e: any) {
+      console.error("Mic monitoring failed:", e);
+      setMicError(e.message || "Microphone access denied or failed.");
+    }
+  };
+
+  const stopMonitoring = () => {
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(track => track.stop());
+      micStreamRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+    setMicActivity(0);
+  };
+
+  // Safety valve for stuck starting state
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (isStartingRef.current) {
+        console.warn("Recognition start timed out, resetting flag.");
+        isStartingRef.current = false;
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Auto-restart if listening for too long without any results
+  useEffect(() => {
+    if (voiceAiListening && !voiceAiTranscript && voiceAiOn) {
+      const timer = setTimeout(() => {
+        if (voiceAiListening && !voiceAiTranscript && voiceAiOn) {
+          console.warn("Listening for 15s with no transcript, performing soft restart...");
+          if (recognitionRef.current) {
+            try { recognitionRef.current.stop(); } catch(e) {}
+          }
+        }
+      }, 15000);
+      return () => clearTimeout(timer);
+    }
+  }, [voiceAiListening, voiceAiTranscript, voiceAiOn]);
 
   // Knowledge Base
   const [kbDocs, setKbDocs] = useState<any[]>([
@@ -193,8 +296,23 @@ export default function AdvocatePortal() {
         setClients(initial);
       }
       
-      setAiStatus(aiEngine.getStatus());
+      const checkStatus = async () => {
+        const status = aiEngine.getStatus();
+        try {
+          // Ping Ollama to see if it's actually running
+          await axios.get('http://localhost:11434/api/tags', { timeout: 1000 });
+          status.ollamaReady = true;
+        } catch (e) {
+          status.ollamaReady = false;
+        }
+        setAiStatus(status);
+      };
+      
+      checkStatus();
+      const statusInterval = setInterval(checkStatus, 5000);
+      
       if (localStorage.getItem('onboarding_complete')) setShowOnboarding(false);
+      return () => clearInterval(statusInterval);
     };
     init();
 
@@ -348,6 +466,9 @@ export default function AdvocatePortal() {
 
   const sanitizeForSpeech = (text: string) => {
     return text
+      .replace(/Offline Brain \(Gemma 3n\):/gi, '')
+      .replace(/\[Offline Mode\]/gi, '')
+      .replace(/\[Offline Vision Mode\]/gi, '')
       .replace(/(\*\*|__)(.*?)\1/g, '$2')
       .replace(/(\*|_)(.*?)\1/g, '$2')
       .replace(/#{1,6}\s+/g, '')
@@ -364,13 +485,12 @@ export default function AdvocatePortal() {
   const speakResponse = useCallback((text: string) => {
     if (!text) return;
     
-    // Force reset of speech synthesis to prevent "two voices"
-    window.speechSynthesis.pause();
+    // Cancel any ongoing speech to prevent overlap
     window.speechSynthesis.cancel();
-    window.speechSynthesis.resume();
     
     // Set speaking state immediately
     setVoiceAiSpeaking(true);
+    isSpeakingRef.current = true;
     
     const cleanText = sanitizeForSpeech(text);
     const utterance = new SpeechSynthesisUtterance(cleanText);
@@ -380,7 +500,7 @@ export default function AdvocatePortal() {
     const lang = hasMalayalam ? 'ml-IN' : 'en-US';
     utterance.lang = lang;
 
-    // Try to find a consistent voice to avoid male/female mixup
+    // Try to find a consistent voice
     const voices = window.speechSynthesis.getVoices();
     const preferredVoice = voices.find(v => v.lang.startsWith(lang) && (v.name.includes('Female') || v.name.includes('Google') || v.name.includes('Samantha'))) 
                          || voices.find(v => v.lang.startsWith(lang));
@@ -391,20 +511,38 @@ export default function AdvocatePortal() {
 
     utterance.onstart = () => {
       setVoiceAiSpeaking(true);
+      isSpeakingRef.current = true;
     };
     utterance.onend = () => {
       setVoiceAiSpeaking(false);
+      isSpeakingRef.current = false;
     };
     utterance.onerror = (e) => {
       console.error("Speech synthesis error:", e);
       setVoiceAiSpeaking(false);
+      isSpeakingRef.current = false;
     };
-    window.speechSynthesis.speak(utterance);
+    
+    // Small delay to ensure cancel() has finished
+    setTimeout(() => {
+      window.speechSynthesis.speak(utterance);
+    }, 50);
   }, []);
 
-  const processVoiceCommand = useCallback(async (text: string) => {
-    if (!text.trim()) return;
+  const isProcessingRef = useRef(false);
 
+  const processVoiceCommand = useCallback(async (text: string) => {
+    if (!text.trim() || isProcessingRef.current) return;
+    
+    // Filter out very short, likely noise inputs (e.g., single characters)
+    if (text.trim().length < 2) {
+      setVoiceAiTranscript('');
+      voiceAiTranscriptRef.current = '';
+      return;
+    }
+
+    setIsProcessing(true);
+    isProcessingRef.current = true;
     setView('consult'); // Switch to consult tab automatically
     setVoiceAiThinking(true);
     
@@ -444,6 +582,8 @@ export default function AdvocatePortal() {
       speakResponse(errorMsg);
     } finally {
       setVoiceAiThinking(false);
+      setIsProcessing(false);
+      isProcessingRef.current = false;
     }
   }, [camOn, speakResponse]);
 
@@ -461,6 +601,11 @@ export default function AdvocatePortal() {
       } catch (e) {}
     }
 
+    // Ensure AudioContext is resumed on user gesture
+    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume();
+    }
+
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       console.warn("Speech recognition not supported in this browser.");
@@ -469,32 +614,70 @@ export default function AdvocatePortal() {
 
     isStartingRef.current = true;
     const recognition = new SpeechRecognition();
-    recognition.continuous = true; // Changed to true for better multi-word capture
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = voiceAiLang;
 
     recognition.onstart = () => {
       isStartingRef.current = false;
+      // Guard: if AI is speaking, don't start listening
+      if (window.speechSynthesis.speaking || voiceAiSpeaking || isSpeakingRef.current) {
+        try { recognition.abort(); } catch(e) {}
+        setVoiceAiListening(false);
+        return;
+      }
       setVoiceAiListening(true);
       setVoiceAiTranscript('');
       voiceAiTranscriptRef.current = '';
+
+      // Initial silence timeout: if no speech at all for 12s, stop.
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = setTimeout(() => {
+        if (recognitionRef.current && !voiceAiTranscriptRef.current) {
+          console.log("No speech detected after 12s, stopping.");
+          try { recognitionRef.current.stop(); } catch(e) {}
+        }
+      }, 12000);
+    };
+
+    recognition.onspeechstart = () => {
+      console.log("Speech detected...");
+    };
+
+    recognition.onsoundstart = () => {
+      console.log("Sound detected...");
     };
 
     recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
-        .map((result: any) => result[0])
-        .map((result: any) => result.transcript)
-        .join('');
-      setVoiceAiTranscript(transcript);
-      voiceAiTranscriptRef.current = transcript;
+      // Guard: ignore results if AI is speaking to prevent feedback loops
+      if (window.speechSynthesis.speaking || voiceAiSpeaking || isSpeakingRef.current) {
+        try { recognition.abort(); } catch(e) {}
+        return;
+      }
+
+      if (!event.results) return;
+
+      let transcript = '';
+      // Rebuild the entire transcript from all results to ensure continuity
+      for (let i = 0; i < event.results.length; i++) {
+        // Capture all results to avoid missing words
+        transcript += event.results[i][0].transcript + ' ';
+      }
+      
+      const trimmedTranscript = transcript.trim();
+      if (trimmedTranscript) {
+        setVoiceAiTranscript(trimmedTranscript);
+        voiceAiTranscriptRef.current = trimmedTranscript;
+      }
 
       // Silence detection: if we get a result, reset the timer
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = setTimeout(() => {
         if (recognitionRef.current) {
-          recognitionRef.current.stop();
+          console.log("Silence detected after speech, stopping to process.");
+          try { recognitionRef.current.stop(); } catch(e) {}
         }
-      }, 2000); // 2 seconds of silence triggers processing
+      }, 5000); // 5 seconds of silence after speech detected (increased for better capture)
     };
 
     recognition.onend = () => {
@@ -502,9 +685,22 @@ export default function AdvocatePortal() {
       setVoiceAiListening(false);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       
+      // Guard: if AI is speaking, don't process the transcript (it's likely feedback)
+      if (window.speechSynthesis.speaking || voiceAiSpeaking || isSpeakingRef.current) {
+        voiceAiTranscriptRef.current = '';
+        setVoiceAiTranscript('');
+        return;
+      }
+
       const finalTranscript = voiceAiTranscriptRef.current;
       if (finalTranscript.trim()) {
         processVoiceCommand(finalTranscript);
+      } else {
+        console.log("Recognition ended with no transcript.");
+        // If it was a manual stop or timeout without speech, just reset
+        if (!voiceAiThinking && !voiceAiSpeaking) {
+          setVoiceAiTranscript('');
+        }
       }
     };
 
@@ -545,26 +741,72 @@ export default function AdvocatePortal() {
   }, [voiceAiLang]);
 
   useEffect(() => {
-    if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isStartingRef.current) {
+    if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isProcessing && !isStartingRef.current) {
       const timer = setTimeout(() => {
-        if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isStartingRef.current) {
+        if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isProcessing && !isStartingRef.current) {
           startVoiceAi();
         }
-      }, 1500); // Increased delay slightly for stability
+      }, 1500);
       return () => clearTimeout(timer);
     }
-  }, [voiceAiOn, voiceAiListening, voiceAiThinking, voiceAiSpeaking, startVoiceAi]);
+  }, [voiceAiOn, voiceAiListening, voiceAiThinking, voiceAiSpeaking, isProcessing, startVoiceAi]);
 
-  const stopVoiceAi = () => {
+  const stopVoiceAi = useCallback(() => {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     if (recognitionRef.current) {
-      recognitionRef.current.stop();
+      try {
+        recognitionRef.current.onstart = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onspeechstart = null;
+        recognitionRef.current.onsoundstart = null;
+        recognitionRef.current.abort();
+      } catch (e) {}
+      recognitionRef.current = null;
     }
     window.speechSynthesis.cancel();
     setVoiceAiOn(false);
     setVoiceAiListening(false);
     setVoiceAiSpeaking(false);
+    isSpeakingRef.current = false;
+    stopMonitoring();
+  }, []);
+
+  const testVoice = () => {
+    speakResponse("This is a test of the Nexus Voice AI. If you can hear this, your audio is working correctly.");
   };
+
+  const toggleVoiceAi = useCallback(() => {
+    if (voiceAiOn) {
+      stopVoiceAi();
+    } else {
+      setVoiceAiOn(true);
+      startMonitoring();
+      startVoiceAi();
+      setView('consult');
+    }
+  }, [voiceAiOn, stopVoiceAi, startVoiceAi]);
+
+  const resetVoiceAi = useCallback(() => {
+    stopVoiceAi();
+    setVoiceAiReply('');
+    setVoiceAiThinking(false);
+    setActiveEngine('');
+    setVoiceAiTranscript('');
+    voiceAiTranscriptRef.current = '';
+    setIsProcessing(false);
+    window.speechSynthesis.cancel();
+    setVoiceAiSpeaking(false);
+    isSpeakingRef.current = false;
+    setMicError(null);
+    setMicActivity(0);
+    
+    // Restart after a brief delay
+    setTimeout(() => {
+      toggleVoiceAi();
+    }, 500);
+  }, [stopVoiceAi, toggleVoiceAi]);
 
   // --- Sidebar & Tab Config ---
   const sideNav = [
@@ -649,17 +891,22 @@ export default function AdvocatePortal() {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div className={`px-3 py-1 rounded-full flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest ${
-              isOffline ? 'bg-red-500/10 text-red-500' : 'bg-emerald-500/10 text-emerald-500'
+              isOffline ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'
             }`}>
               {isOffline ? <WifiOff size={12} /> : <Wifi size={12} />}
-              {isOffline ? 'Offline Mode' : 'Cloud Active'}
+              {isOffline ? 'Local Mode' : 'Cloud Active'}
             </div>
             <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,.1)' }} />
-            <div style={{ padding: '4px 12px', background: 'rgba(255,255,255,.05)', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.builtIn ? '#10b981' : '#6366f1', display: 'inline-block' }} />
-              <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.builtIn ? '#10b981' : '#6366f1', letterSpacing: '0.2em', textTransform: 'uppercase' }}>
-                {aiStatus.builtIn ? 'Chrome AI Ready' : 'Sarvam 30B Active'}
-              </span>
+            <div style={{ padding: '4px 12px', background: 'rgba(255,255,255,.05)', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.ollamaReady ? '#10b981' : (isOffline ? (aiStatus.builtIn || aiStatus.offlineBrain) : aiStatus.sarvamReady) ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
+                <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.ollamaReady ? '#10b981' : (isOffline ? (aiStatus.builtIn || aiStatus.offlineBrain) : aiStatus.sarvamReady) ? '#10b981' : '#f43f5e', letterSpacing: '0.2em', textTransform: 'uppercase' }}>
+                  {aiStatus.ollamaReady ? 'Gemma 3 Orchestrator Active' : (isOffline ? 'Local Mode' : aiStatus.sarvamReady ? 'Sarvam 30B Active' : 'Gemini 3 Active')}
+                </span>
+              </div>
+              {!isOffline && !aiStatus.sarvamReady && (
+                <div style={{ fontSize: 8, color: '#f43f5e', fontWeight: 900, opacity: 0.7 }}>SARVAM KEY MISSING</div>
+              )}
             </div>
           </div>
         </header>
@@ -934,7 +1181,7 @@ export default function AdvocatePortal() {
                       {installingBrain ? (
                         <div style={{ marginBottom: 16 }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, fontWeight: 900, marginBottom: 6, textTransform: 'uppercase' }}>
-                            <span>Downloading Brain Assets...</span>
+                            <span>Downloading Slice {installSlice}: {installSlice === 1 ? 'Core Weights' : 'Legal Knowledge Base'}...</span>
                             <span>{installProgress}%</span>
                           </div>
                           <div style={{ height: 6, background: 'rgba(255,255,255,.05)', borderRadius: 3, overflow: 'hidden' }}>
@@ -943,32 +1190,39 @@ export default function AdvocatePortal() {
                         </div>
                       ) : aiStatus.offlineBrain ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#10b981', fontSize: 12, fontWeight: 700 }}>
-                          <CheckCircle size={16} /> Brain is ready for offline use.
+                          <CheckCircle size={16} /> Gemma 3n is ready for offline use.
                         </div>
                       ) : (
                         <button 
-                          onClick={() => {
+                          onClick={async () => {
                             setInstallingBrain(true);
                             setInstallProgress(0);
-                            const interval = setInterval(() => {
-                              setInstallProgress(prev => {
-                                if (prev >= 100) {
-                                  clearInterval(interval);
-                                  localStorage.setItem('offline_brain_installed', 'true');
-                                  setAiStatus(aiEngine.getStatus());
-                                  setInstallingBrain(false);
-                                  alert("Offline Brain installed successfully.");
-                                  return 100;
-                                }
-                                return prev + 5;
+                            setInstallSlice(1);
+                            try {
+                              await aiEngine.pullModel((slice, percent) => {
+                                setInstallSlice(slice);
+                                setInstallProgress(percent);
                               });
-                            }, 100);
+                              setAiStatus(aiEngine.getStatus());
+                              setInstallingBrain(false);
+                              alert("Offline Brain (Gemma 3n) installed successfully via Ollama.");
+                            } catch (e) {
+                              console.error(e);
+                              setInstallingBrain(false);
+                              alert("Failed to install brain. Please ensure Ollama is running.");
+                            }
                           }}
                           style={{ width: '100%', padding: '14px', background: '#f59e0b', border: 'none', borderRadius: 12, color: '#000', fontWeight: 900, fontSize: 13, cursor: 'pointer' }}
                         >
-                          Install Brain Now
+                          Install Gemma 3n Now
                         </button>
                       )}
+                    </div>
+                    <div style={{ marginTop: 20, padding: 16, background: 'rgba(255,255,255,.03)', borderRadius: 16, border: '1px solid rgba(255,255,255,.05)' }}>
+                      <p style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.6, margin: 0 }}>
+                        The Offline Brain (Gemma 3n) allows you to process legal queries without an internet connection. 
+                        It is downloaded in two slices: the base model weights and the Nexus legal fine-tune.
+                      </p>
                     </div>
                   </div>
 
@@ -1048,6 +1302,13 @@ export default function AdvocatePortal() {
                       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                         <div style={{ maxWidth: '80%', padding: '13px 17px', borderRadius: 20, background: 'rgba(99,102,241,.05)', border: '1px solid rgba(99,102,241,.1)', fontSize: 13, lineHeight: 1.7, opacity: 0.6 }}>
                           <span className="italic">"{voiceAiTranscript}"</span>
+                        </div>
+                      </div>
+                    )}
+                    {voiceAiListening && !voiceAiTranscript && (
+                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                        <div style={{ maxWidth: '80%', padding: '13px 17px', borderRadius: 20, background: 'rgba(99,102,241,.05)', border: '1px solid rgba(99,102,241,.1)', fontSize: 13, lineHeight: 1.7, opacity: 0.4 }}>
+                          <span className="italic">Listening...</span>
                         </div>
                       </div>
                     )}
@@ -1244,7 +1505,47 @@ export default function AdvocatePortal() {
                   <span style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
                     {voiceAiListening ? 'Listening...' : voiceAiThinking ? 'Thinking...' : voiceAiSpeaking ? 'Speaking...' : 'Nexus AI Ready'}
                   </span>
-                  <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+                  
+                  {voiceAiListening && (
+                    <div style={{ display: 'flex', gap: 2, alignItems: 'flex-end', height: 10, marginLeft: 4 }}>
+                      {micActivity < 3 && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ fontSize: 8, color: '#ef4444', fontWeight: 900 }}>
+                            {micError ? 'MIC ERROR' : 'NO SOUND'}
+                          </span>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); resetVoiceAi(); }}
+                            style={{ fontSize: 7, padding: '1px 4px', borderRadius: 3, background: 'rgba(239,68,68,0.2)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', cursor: 'pointer', fontWeight: 900 }}
+                          >
+                            RESET
+                          </button>
+                        </div>
+                      )}
+                      {[0,1,2,3,4].map(i => (
+                        <motion.div 
+                          key={i}
+                          animate={{ height: Math.max(2, (micActivity / 255) * 15 * (1 + Math.random())) }}
+                          style={{ width: 2, background: micActivity > 20 ? '#10b981' : '#6366f1', borderRadius: 1 }}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <button 
+                      onClick={() => setShowVoiceHelp(!showVoiceHelp)}
+                      style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: 'rgba(255,255,255,0.05)', color: '#94a3b8', border: 'none', cursor: 'pointer', fontWeight: 900 }}
+                    >
+                      HELP
+                    </button>
+                    {voiceAiListening && voiceAiTranscript && (
+                      <button 
+                        onClick={() => { if(recognitionRef.current) try { recognitionRef.current.stop(); } catch(e) {} }}
+                        style={{ fontSize: 8, padding: '4px 8px', borderRadius: 6, background: '#10b981', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 900, textTransform: 'uppercase' }}
+                      >
+                        Process Now
+                      </button>
+                    )}
                     <button 
                       onClick={() => setVoiceAiLang('en-IN')}
                       style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: voiceAiLang === 'en-IN' ? '#6366f1' : 'rgba(255,255,255,0.05)', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 900 }}
@@ -1259,6 +1560,30 @@ export default function AdvocatePortal() {
                     </button>
                   </div>
                 </div>
+                {showVoiceHelp && (
+                  <div style={{ marginTop: 12, padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.05)' }}>
+                    <div style={{ fontSize: 9, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase', marginBottom: 8 }}>Troubleshooting</div>
+                    <ul style={{ margin: 0, paddingLeft: 16, fontSize: 10, color: '#94a3b8', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <li>Ensure you are in a quiet environment.</li>
+                      <li>Check if the visualizer bars are moving when you speak.</li>
+                      <li>Try clicking the "Reset AI" button below.</li>
+                      <li>If on mobile, ensure the browser has mic permissions.</li>
+                      <li>Try switching languages (EN/ML).</li>
+                      <li><button onClick={testVoice} style={{ background: 'none', border: 'none', color: '#6366f1', fontSize: 10, fontWeight: 900, cursor: 'pointer', padding: 0 }}>Test Audio Output</button></li>
+                    </ul>
+                    {micError && (
+                      <div style={{ marginTop: 8, fontSize: 9, color: '#ef4444', background: 'rgba(239,68,68,0.1)', padding: '4px 8px', borderRadius: 4 }}>
+                        Error: {micError}
+                      </div>
+                    )}
+                    <button 
+                      onClick={resetVoiceAi}
+                      style={{ marginTop: 10, width: '100%', padding: '6px', borderRadius: 6, background: '#6366f1', color: 'white', border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 900 }}
+                    >
+                      RESET VOICE AI
+                    </button>
+                  </div>
+                )}
                 {voiceAiTranscript && (
                   <div style={{ fontSize: 13, color: '#fff', marginTop: 12, fontStyle: 'italic', borderLeft: '3px solid #6366f1', paddingLeft: 12, background: 'rgba(99,102,241,0.1)', padding: '8px 12px', borderRadius: '0 8px 8px 0' }}>
                     <span style={{ color: '#6366f1', fontWeight: 900, marginRight: 6, fontSize: 10, textTransform: 'uppercase' }}>Captured:</span> {voiceAiTranscript}
@@ -1284,10 +1609,10 @@ export default function AdvocatePortal() {
                 )}
                 <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
-                    Engine: {activeEngine || (isOffline || aiStatus.offlineBrain ? 'Gemma 3-1B-it' : aiStatus.builtIn ? 'Gemini Nano' : 'Gemini 3 Flash')}
+                    Engine: {activeEngine || (isOffline || aiStatus.offlineBrain ? 'Gemma 3n' : aiStatus.builtIn ? 'Gemini Nano' : 'Gemini 3 Flash')}
                   </span>
                   {(voiceAiReply || voiceAiThinking) && (
-                    <button onClick={() => { setVoiceAiReply(''); setVoiceAiThinking(false); setActiveEngine(''); }} style={{ fontSize: 8, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase', background: 'none', border: 'none', cursor: 'pointer' }}>
+                    <button onClick={resetVoiceAi} style={{ fontSize: 8, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase', background: 'none', border: 'none', cursor: 'pointer' }}>
                       Reset
                     </button>
                   )}
@@ -1301,21 +1626,20 @@ export default function AdvocatePortal() {
             <button onClick={() => { setCamOn(!camOn); setView('reading-room'); if(!camOn) startScan(); }} style={{ width: 48, height: 48, borderRadius: '50%', background: camOn ? '#6366f1' : 'rgba(255,255,255,.05)', border: 'none', color: camOn ? '#fff' : '#475569', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.3s' }}>
               <Camera size={20} />
             </button>
-            <button onClick={() => { 
-              if (voiceAiOn) {
-                stopVoiceAi();
-              } else {
-                setVoiceAiOn(true);
-                startVoiceAi();
-                setView('consult'); // Switch to consult tab when starting voice AI
-              }
-            }} style={{ width: 56, height: 56, borderRadius: '50%', background: voiceAiOn ? '#ef4444' : '#6366f1', border: 'none', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.3s', transform: voiceAiOn ? 'scale(1.1)' : 'scale(1)' }}>
-              <Mic size={24} />
-            </button>
+            <motion.button 
+              animate={voiceAiListening ? { scale: [1, 1.15, 1], boxShadow: ["0 0 0px rgba(239, 68, 68, 0)", "0 0 20px rgba(239, 68, 68, 0.5)", "0 0 0px rgba(239, 68, 68, 0)"] } : { scale: 1 }}
+              transition={{ repeat: Infinity, duration: 1.5 }}
+              onClick={toggleVoiceAi} 
+              style={{ width: 56, height: 56, borderRadius: '50%', background: voiceAiOn ? '#ef4444' : '#6366f1', border: 'none', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.3s', cursor: 'pointer' }}
+            >
+              {voiceAiOn ? <Square size={24} fill="#fff" /> : <Mic size={24} />}
+            </motion.button>
             <div style={{ width: 1, height: 32, background: 'rgba(255,255,255,.1)' }} />
             <div style={{ textAlign: 'left' }}>
               <div style={{ fontSize: 9, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Nexus Link</div>
-              <div style={{ fontSize: 8, color: voiceAiOn ? '#10b981' : '#475569', fontWeight: 700 }}>{voiceAiOn ? '● ONLINE' : 'OFFLINE'}</div>
+              <div style={{ fontSize: 8, color: voiceAiListening ? '#ef4444' : voiceAiThinking ? '#6366f1' : voiceAiOn ? '#10b981' : '#475569', fontWeight: 700 }}>
+                {voiceAiListening ? '● LISTENING...' : voiceAiThinking ? '● THINKING...' : voiceAiOn ? '● ACTIVE' : 'STANDBY'}
+              </div>
             </div>
           </div>
         </div>
