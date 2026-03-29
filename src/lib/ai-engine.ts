@@ -2,8 +2,10 @@ import axios from 'axios';
 import { GoogleGenAI } from "@google/genai";
 
 export type AIMessage = {
+  id?: number;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  engine?: string;
 };
 
 export class HybridAIEngine {
@@ -127,9 +129,9 @@ export class HybridAIEngine {
   private async callLocalOllama(prompt: string, history: AIMessage[]): Promise<string | null> {
     try {
       const response = await axios.post('http://localhost:11434/api/chat', {
-        model: "gemma3n", 
+        model: "gemma3-1b-it", 
         messages: [
-          { role: "system", content: "You are the Gemma 3n Orchestrator for Nexus Justice. Your role is to facilitate communication between the AI system and advocates, and to assist advocates when they are interacting with their clients, including during phone consultations. You are professional, authoritative, and helpful. You handle general queries directly and delegate complex legal research or drafting tasks to specialized engines when necessary." },
+          { role: "system", content: "You are the Gemma 3 Orchestrator for Nexus Justice. Your role is to facilitate communication between the AI system and advocates, and to assist advocates when they are interacting with their clients, including during phone consultations. You are professional, authoritative, and helpful. You handle general queries directly and delegate complex legal research or drafting tasks to specialized engines when necessary." },
           ...history.map(m => ({ role: m.role, content: m.content })),
           { role: "user", content: prompt }
         ],
@@ -141,16 +143,11 @@ export class HybridAIEngine {
     }
   }
 
-  public async pullModel(onProgress: (slice: number, percent: number) => void): Promise<void> {
-    // Slice 1: Core Weights (Gemma 3n Base)
+  public async pullModel(onProgress: (percent: number) => void): Promise<void> {
+    // Single download for Gemma 3-1b-it
     for (let i = 0; i <= 100; i += 2) {
-      onProgress(1, i);
-      await new Promise(r => setTimeout(r, 50));
-    }
-    // Slice 2: Legal Knowledge Base (Nexus Fine-tune)
-    for (let i = 0; i <= 100; i += 2) {
-      onProgress(2, i);
-      await new Promise(r => setTimeout(r, 70));
+      onProgress(i);
+      await new Promise(r => setTimeout(r, 60));
     }
     localStorage.setItem('offline_brain_installed', 'true');
   }
@@ -183,10 +180,10 @@ export class HybridAIEngine {
         }
       }
 
-      // 2. If not complex, or if online models failed, Gemma 3n handles it directly
+      // 2. If not complex, or if online models failed, Gemma 3 handles it directly
       const localGemma = await this.callLocalOllama(prompt, history);
       if (localGemma) {
-        return { text: localGemma, engine: 'Gemma 3n (Local Orchestrator)' };
+        return { text: localGemma, engine: 'Gemma 3 (Local Orchestrator)' };
       }
 
       // 3. Fallback to Mock Offline Brain if everything else fails
@@ -194,29 +191,29 @@ export class HybridAIEngine {
       if (hasOfflineBrain) {
         if (imageBase64) {
           return { 
-            text: `[Gemma 3n Orchestrator] I have analyzed the document locally. It appears to be related to: "${prompt}". I am processing this locally for your privacy.`, 
-            engine: 'Gemma 3n (Mock Orchestrator)' 
+            text: `[Gemma 3 Orchestrator] I have analyzed the document locally. It appears to be related to: "${prompt}". I am processing this locally for your privacy.`, 
+            engine: 'Gemma 3 (Mock Orchestrator)' 
           };
         }
         
-        let mockReply = `[Gemma 3n Orchestrator] I am handling your request regarding "${prompt}".`;
+        let mockReply = `[Gemma 3 Orchestrator] I am handling your request regarding "${prompt}".`;
         const lowerPrompt = prompt.toLowerCase();
         
         if (lowerPrompt.includes('hello') || lowerPrompt.includes('hi')) {
-          mockReply = "Hello! I am the Gemma 3n Orchestrator for Nexus Justice. I am here to assist you and your clients, even during phone calls. How can I help you today?";
+          mockReply = "Hello! I am the Gemma 3 Orchestrator for Nexus Justice. I am here to assist you and your clients, even during phone calls. How can I help you today?";
         } else if (lowerPrompt.includes('who are you')) {
-          mockReply = "I am the Gemma 3n Orchestrator. I coordinate between specialized legal engines to provide you with the best legal assistance for you and your clients.";
+          mockReply = "I am the Gemma 3 Orchestrator. I coordinate between specialized legal engines to provide you with the best legal assistance for you and your clients.";
         } else if (lowerPrompt.includes('303') && lowerPrompt.includes('ipc')) {
           mockReply = "Section 303 of the IPC was struck down as unconstitutional in Mithu v. State of Punjab (1983). It previously mandated the death penalty for murder by a life-convict.";
         } else if (lowerPrompt.includes('bail')) {
           mockReply = "Bail is a fundamental right in bailable offences. For non-bailable ones, it's at the court's discretion. Would you like me to draft a bail application?";
         }
 
-        return { text: mockReply, engine: 'Gemma 3n (Mock Orchestrator)' };
+        return { text: mockReply, engine: 'Gemma 3 (Mock Orchestrator)' };
       }
 
       return { 
-        text: "Gemma 3n Orchestrator: I am currently unable to reach the specialized legal engines. Please check your connection or ensure the local brain is active.", 
+        text: "Gemma 3 Orchestrator: I am currently unable to reach the specialized legal engines. Please check your connection or ensure the local brain is active.", 
         engine: 'None' 
       };
     };

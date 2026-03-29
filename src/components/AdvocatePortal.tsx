@@ -280,20 +280,34 @@ export default function AdvocatePortal() {
   // --- Initialization ---
   useEffect(() => {
     const init = async () => {
-      await localDB.init();
-      const savedClients = localDB.query("SELECT * FROM clients") as any[];
-      if (savedClients.length > 0) {
-        setClients(savedClients);
-      } else {
-        const initial = [
-          { id: 1, name: 'Sreedharan K.', phone: '+91 9876543210', court: 'District Court, Aluva', case_number: 'OS 145/2025', next_date: '2026-03-15', purpose: 'Filing Written Statement' },
-          { id: 2, name: 'Elena Rodriguez', phone: '+1 555-0199', court: 'High Court', case_number: 'WP(C) 204/2026', next_date: '2026-03-20', purpose: 'Hearing' },
-        ];
-        initial.forEach(c => {
-          localDB.run("INSERT INTO clients (name, phone, case_number, court, next_date, purpose) VALUES (?, ?, ?, ?, ?, ?)", 
-            [c.name, c.phone, c.case_number, c.court, c.next_date, c.purpose]);
-        });
-        setClients(initial);
+      try {
+        await localDB.init();
+        const savedClients = localDB.query("SELECT * FROM clients") as any[];
+        if (savedClients.length > 0) {
+          setClients(savedClients);
+        } else {
+          const initial = [
+            { id: 1, name: 'Sreedharan K.', phone: '+91 9876543210', court: 'District Court, Aluva', case_number: 'OS 145/2025', next_date: '2026-03-15', purpose: 'Filing Written Statement' },
+            { id: 2, name: 'Elena Rodriguez', phone: '+1 555-0199', court: 'High Court', case_number: 'WP(C) 204/2026', next_date: '2026-03-20', purpose: 'Hearing' },
+          ];
+          initial.forEach(c => {
+            localDB.run("INSERT INTO clients (name, phone, case_number, court, next_date, purpose) VALUES (?, ?, ?, ?, ?, ?)", 
+              [c.name, c.phone, c.case_number, c.court, c.next_date, c.purpose]);
+          });
+          setClients(initial);
+        }
+
+        const savedHistory = localDB.query("SELECT * FROM chat_history ORDER BY id ASC") as any[];
+        if (savedHistory.length > 0) {
+          setChatHistory(savedHistory.map(h => ({ id: h.id, role: h.role, content: h.content, engine: h.engine })));
+        }
+      } catch (err) {
+        console.error("Database initialization failed:", err);
+        // Fallback to in-memory mock data if DB fails
+        setClients([
+          { id: 1, name: 'Sreedharan K. (Offline)', phone: '+91 9876543210', court: 'District Court, Aluva', case_number: 'OS 145/2025', next_date: '2026-03-15', purpose: 'Filing Written Statement' },
+          { id: 2, name: 'Elena Rodriguez (Offline)', phone: '+1 555-0199', court: 'High Court', case_number: 'WP(C) 204/2026', next_date: '2026-03-20', purpose: 'Hearing' },
+        ]);
       }
       
       const checkStatus = async () => {
@@ -339,12 +353,15 @@ export default function AdvocatePortal() {
     const text = initialText || consoleInput.trim();
     if (!text || consoleLoading) return;
     if (!initialText) setConsoleInput("");
-    setChatHistory(prev => [...prev, { role: 'user', content: text }]);
+    
+    const userId = localDB.run("INSERT INTO chat_history (role, content) VALUES (?, ?)", ['user', text]);
+    setChatHistory(prev => [...prev, { id: userId || undefined, role: 'user', content: text }]);
     setConsoleLoading(true);
 
     try {
       const response = await aiEngine.generateResponse(text, chatHistory);
-      setChatHistory(prev => [...prev, { role: 'assistant', content: response.text }]);
+      const aiId = localDB.run("INSERT INTO chat_history (role, content, engine) VALUES (?, ?, ?)", ['assistant', response.text, response.engine]);
+      setChatHistory(prev => [...prev, { id: aiId || undefined, role: 'assistant', content: response.text, engine: response.engine }]);
     } catch (err) {
       console.error(err);
     } finally {
@@ -361,7 +378,7 @@ export default function AdvocatePortal() {
 
     try {
       const response = await aiEngine.generateResponse(text, []);
-      setDeskChatHistory(prev => [...prev, { role: 'ai', text: response.text }]);
+      setDeskChatHistory(prev => [...prev, { role: 'ai', text: response.text, engine: response.engine }]);
     } catch (err) {
       console.error(err);
     } finally {
@@ -466,7 +483,7 @@ export default function AdvocatePortal() {
 
   const sanitizeForSpeech = (text: string) => {
     return text
-      .replace(/Offline Brain \(Gemma 3n\):/gi, '')
+      .replace(/Offline Brain \(Gemma 3\):/gi, '')
       .replace(/\[Offline Mode\]/gi, '')
       .replace(/\[Offline Vision Mode\]/gi, '')
       .replace(/(\*\*|__)(.*?)\1/g, '$2')
@@ -480,6 +497,32 @@ export default function AdvocatePortal() {
       .replace(/\n/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+  };
+
+  const downloadResponse = (text: string, filename: string = 'ai_response.txt') => {
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const deleteMessage = (index: number) => {
+    const msg = chatHistory[index];
+    if (msg?.id) {
+      localDB.run("DELETE FROM chat_history WHERE id = ?", [msg.id]);
+    }
+    setChatHistory(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const deleteDeskMessage = (index: number) => {
+    setDeskChatHistory(prev => prev.filter((_, i) => i !== index));
   };
 
   const speakResponse = useCallback((text: string) => {
@@ -547,7 +590,8 @@ export default function AdvocatePortal() {
     setVoiceAiThinking(true);
     
     // Add user message to history immediately so it shows up in the UI
-    setChatHistory(prev => [...prev, { role: 'user', content: text }]);
+    const userId = localDB.run("INSERT INTO chat_history (role, content) VALUES (?, ?)", ['user', text]);
+    setChatHistory(prev => [...prev, { id: userId || undefined, role: 'user', content: text }]);
     
     // Ensure the transcript stays visible in the dock while thinking
     setVoiceAiTranscript(text);
@@ -571,7 +615,8 @@ export default function AdvocatePortal() {
       setVoiceAiTranscript('');
       setVoiceAiReply(response.text);
       setActiveEngine(response.engine);
-      setChatHistory(prev => [...prev, { role: 'assistant', content: response.text }]);
+      const aiId = localDB.run("INSERT INTO chat_history (role, content, engine) VALUES (?, ?, ?)", ['assistant', response.text, response.engine]);
+      setChatHistory(prev => [...prev, { id: aiId || undefined, role: 'assistant', content: response.text, engine: response.engine }]);
       speakResponse(response.text);
     } catch (err) {
       console.error(err);
@@ -629,6 +674,7 @@ export default function AdvocatePortal() {
       setVoiceAiListening(true);
       setVoiceAiTranscript('');
       voiceAiTranscriptRef.current = '';
+      setView('consult'); // Automatically open Consult page when listening starts
 
       // Initial silence timeout: if no speech at all for 12s, stop.
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
@@ -843,11 +889,13 @@ export default function AdvocatePortal() {
         .fade-up{animation:fadeUp .35s ease forwards}
         .spin{animation:spin 1s linear infinite}
         .pulse-a{animation:pulse2 2s ease-in-out infinite}
-        ::-webkit-scrollbar{width:4px}
+        ::-webkit-scrollbar{width:4px;height:4px}
         ::-webkit-scrollbar-thumb{background:rgba(99,102,241,.4);border-radius:4px}
         input,textarea,select{color:#e2e8f0;outline:none}
         input::placeholder,textarea::placeholder{color:#475569}
-        .tab-scroll::-webkit-scrollbar{display:none}
+        .tab-scroll::-webkit-scrollbar{height:4px;display:block}
+        .tab-scroll::-webkit-scrollbar-thumb{background:rgba(245,158,11,.4);border-radius:4px}
+        .tab-scroll::-webkit-scrollbar-track{background:rgba(255,255,255,.02);border-radius:4px}
         button:focus{outline:none}
         .kb-drop{border:2px dashed rgba(99,102,241,.3);border-radius:20px;transition:all .2s}
         .kb-drop.over{border-color:#6366f1;background:rgba(99,102,241,.05)}
@@ -897,23 +945,48 @@ export default function AdvocatePortal() {
               {isOffline ? 'Local Mode' : 'Cloud Active'}
             </div>
             <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,.1)' }} />
-            <div style={{ padding: '4px 12px', background: 'rgba(255,255,255,.05)', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ padding: '4px 12px', background: 'rgba(255,255,255,.05)', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 16 }}>
+              {/* Gemini Status */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.ollamaReady ? '#10b981' : (isOffline ? (aiStatus.builtIn || aiStatus.offlineBrain) : aiStatus.sarvamReady) ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
-                <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.ollamaReady ? '#10b981' : (isOffline ? (aiStatus.builtIn || aiStatus.offlineBrain) : aiStatus.sarvamReady) ? '#10b981' : '#f43f5e', letterSpacing: '0.2em', textTransform: 'uppercase' }}>
-                  {aiStatus.ollamaReady ? 'Gemma 3 Orchestrator Active' : (isOffline ? 'Local Mode' : aiStatus.sarvamReady ? 'Sarvam 30B Active' : 'Gemini 3 Active')}
+                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.geminiReady ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
+                <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.geminiReady ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  Gemini: {aiStatus.geminiReady ? 'Active' : 'Offline'}
                 </span>
               </div>
-              {!isOffline && !aiStatus.sarvamReady && (
-                <div style={{ fontSize: 8, color: '#f43f5e', fontWeight: 900, opacity: 0.7 }}>SARVAM KEY MISSING</div>
-              )}
+              
+              <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,.1)' }} />
+
+              {/* Sarvam Status */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.sarvamReady ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
+                <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.sarvamReady ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  Sarvam: {aiStatus.sarvamReady ? 'Active' : 'Offline'}
+                </span>
+              </div>
+
+              <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,.1)' }} />
+
+              {/* Gemma 3 Status */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: (aiStatus.ollamaReady || aiStatus.offlineBrain) ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: 9, fontWeight: 900, color: (aiStatus.ollamaReady || aiStatus.offlineBrain) ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                    Gemma 3: {(aiStatus.ollamaReady || aiStatus.offlineBrain) ? 'Active' : 'Not Active'}
+                  </span>
+                  {!(aiStatus.ollamaReady || aiStatus.offlineBrain) && (
+                    <button onClick={() => setView('config')} style={{ fontSize: 7, color: '#f59e0b', background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', textDecoration: 'underline', fontWeight: 900, textTransform: 'uppercase' }}>
+                      Install Brain
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </header>
 
         {/* Tab bar (Upside Menus) */}
-        <div style={{ background: '#070b14', borderBottom: '1px solid rgba(255,255,255,.05)', flexShrink: 0, display: 'flex', alignItems: 'center', position: 'relative' }}>
-          <div className="tab-scroll" style={{ flex: 1, display: 'flex', gap: 0, overflowX: 'auto', scrollbarWidth: 'none', padding: '0 4px' }}>
+        <div style={{ background: '#070b14', borderBottom: '1px solid rgba(255,255,255,.05)', flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'relative', width: '100%' }}>
+          <div className="tab-scroll" style={{ width: '100%', display: 'flex', gap: 0, overflowX: 'auto', padding: '0 4px', minWidth: 0 }}>
             {sideNav.map(item => (
               <button key={item.id} onClick={() => setView(item.id)}
                 style={{ padding: '10px 18px', background: 'none', border: 'none', borderBottom: view === item.id ? '2px solid #6366f1' : '2px solid transparent', color: view === item.id ? '#6366f1' : '#475569', fontSize: 10, fontWeight: 900, letterSpacing: '0.12em', textTransform: 'uppercase', cursor: 'pointer', whiteSpace: 'nowrap', transition: 'color .2s', flexShrink: 0 }}>
@@ -1181,7 +1254,7 @@ export default function AdvocatePortal() {
                       {installingBrain ? (
                         <div style={{ marginBottom: 16 }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, fontWeight: 900, marginBottom: 6, textTransform: 'uppercase' }}>
-                            <span>Downloading Slice {installSlice}: {installSlice === 1 ? 'Core Weights' : 'Legal Knowledge Base'}...</span>
+                            <span>Downloading Gemma 3-1B-it...</span>
                             <span>{installProgress}%</span>
                           </div>
                           <div style={{ height: 6, background: 'rgba(255,255,255,.05)', borderRadius: 3, overflow: 'hidden' }}>
@@ -1190,22 +1263,20 @@ export default function AdvocatePortal() {
                         </div>
                       ) : aiStatus.offlineBrain ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#10b981', fontSize: 12, fontWeight: 700 }}>
-                          <CheckCircle size={16} /> Gemma 3n is ready for offline use.
+                          <CheckCircle size={16} /> Gemma 3 is ready for offline use.
                         </div>
                       ) : (
                         <button 
                           onClick={async () => {
                             setInstallingBrain(true);
                             setInstallProgress(0);
-                            setInstallSlice(1);
                             try {
-                              await aiEngine.pullModel((slice, percent) => {
-                                setInstallSlice(slice);
+                              await aiEngine.pullModel((percent) => {
                                 setInstallProgress(percent);
                               });
                               setAiStatus(aiEngine.getStatus());
                               setInstallingBrain(false);
-                              alert("Offline Brain (Gemma 3n) installed successfully via Ollama.");
+                              alert("Offline Brain (Gemma 3) installed successfully via Ollama.");
                             } catch (e) {
                               console.error(e);
                               setInstallingBrain(false);
@@ -1214,14 +1285,14 @@ export default function AdvocatePortal() {
                           }}
                           style={{ width: '100%', padding: '14px', background: '#f59e0b', border: 'none', borderRadius: 12, color: '#000', fontWeight: 900, fontSize: 13, cursor: 'pointer' }}
                         >
-                          Install Gemma 3n Now
+                          Install Gemma 3 Now
                         </button>
                       )}
                     </div>
                     <div style={{ marginTop: 20, padding: 16, background: 'rgba(255,255,255,.03)', borderRadius: 16, border: '1px solid rgba(255,255,255,.05)' }}>
                       <p style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.6, margin: 0 }}>
-                        The Offline Brain (Gemma 3n) allows you to process legal queries without an internet connection. 
-                        It is downloaded in two slices: the base model weights and the Nexus legal fine-tune.
+                        The Offline Brain (Gemma 3) allows you to process legal queries without an internet connection. 
+                        It is a compact yet powerful model optimized for legal reasoning.
                       </p>
                     </div>
                   </div>
@@ -1290,11 +1361,30 @@ export default function AdvocatePortal() {
                           <div className="markdown-body">
                             <ReactMarkdown>{msg.content}</ReactMarkdown>
                           </div>
-                          {msg.role === 'assistant' && (
-                            <button onClick={() => speakResponse(msg.content)} title="Read aloud" style={{ position: 'absolute', bottom: 4, right: 8, background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1', opacity: 0.4 }}>
-                              <Volume2 size={12} />
-                            </button>
-                          )}
+                          
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8, borderTop: '1px solid rgba(255,255,255,.05)', paddingTop: 6, gap: 20 }}>
+                            <span style={{ fontSize: 9, color: '#475569', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              {msg.role === 'user' ? 'You' : (msg.engine || 'Nexus AI')}
+                            </span>
+                            <div style={{ display: 'flex', gap: 10, opacity: 0.5 }}>
+                              {msg.role === 'assistant' && (
+                                <>
+                                  <button onClick={() => speakResponse(msg.content)} title="Read aloud" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
+                                    <Volume2 size={12} />
+                                  </button>
+                                  <button onClick={() => copyToClipboard(msg.content)} title="Copy" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
+                                    <Copy size={12} />
+                                  </button>
+                                  <button onClick={() => downloadResponse(msg.content)} title="Download" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
+                                    <Download size={12} />
+                                  </button>
+                                </>
+                              )}
+                              <button onClick={() => deleteMessage(i)} title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444' }}>
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -1468,6 +1558,26 @@ export default function AdvocatePortal() {
                     {deskChatHistory.map((msg, i) => (
                       <div key={i} style={{ padding: 12, borderRadius: 12, background: msg.role === 'ai' ? 'rgba(255,255,255,.03)' : 'rgba(99,102,241,.1)', border: '1px solid rgba(255,255,255,.05)' }}>
                         <div style={{ fontSize: 11, color: '#94a3b8' }}>{msg.text}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8, borderTop: '1px solid rgba(255,255,255,.05)', paddingTop: 6, gap: 10 }}>
+                          <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                            {msg.role === 'user' ? 'You' : (msg.engine || 'Nexus AI')}
+                          </span>
+                          <div style={{ display: 'flex', gap: 8, opacity: 0.5 }}>
+                            {msg.role === 'ai' && (
+                              <>
+                                <button onClick={() => copyToClipboard(msg.text)} title="Copy" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
+                                  <Copy size={10} />
+                                </button>
+                                <button onClick={() => downloadResponse(msg.text)} title="Download" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
+                                  <Download size={10} />
+                                </button>
+                              </>
+                            )}
+                            <button onClick={() => deleteDeskMessage(i)} title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444' }}>
+                              <Trash2 size={10} />
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1609,7 +1719,7 @@ export default function AdvocatePortal() {
                 )}
                 <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
-                    Engine: {activeEngine || (isOffline || aiStatus.offlineBrain ? 'Gemma 3n' : aiStatus.builtIn ? 'Gemini Nano' : 'Gemini 3 Flash')}
+                    Engine: {activeEngine || (isOffline || aiStatus.offlineBrain ? 'Gemma 3' : aiStatus.builtIn ? 'Gemini Nano' : 'Gemini 3 Flash')}
                   </span>
                   {(voiceAiReply || voiceAiThinking) && (
                     <button onClick={resetVoiceAi} style={{ fontSize: 8, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase', background: 'none', border: 'none', cursor: 'pointer' }}>

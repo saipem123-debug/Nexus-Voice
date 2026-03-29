@@ -1,5 +1,4 @@
 import initSqlJs, { Database } from 'sql.js';
-import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 
 export class LocalDB {
   private static instance: LocalDB;
@@ -17,26 +16,56 @@ export class LocalDB {
   public async init() {
     if (this.db) return;
 
-    const SQL = await initSqlJs({
-      // Using Vite's asset URL feature for better reliability and performance
-      locateFile: () => sqlWasmUrl
-    }).catch(err => {
-      console.error("Failed to initialize sql.js:", err);
-      // Fallback or re-throw with a clearer message
-      if (err.message?.includes('wasm streaming compile failed')) {
-        throw new Error("Wasm streaming failed. This might be due to a network error or a missing wasm file on the CDN.");
-      }
-      throw err;
-    });
+    const cdns = [
+      'https://sql.js.org/dist/sql-wasm.wasm',
+      'https://unpkg.com/sql.js@1.12.0/dist/sql-wasm.wasm',
+      'https://cdn.jsdelivr.net/npm/sql.js@1.12.0/dist/sql-wasm.wasm',
+      'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.wasm'
+    ];
 
-    // Try to load from IndexedDB or start fresh
-    const savedData = localStorage.getItem('nexus_sqlite_db');
-    if (savedData) {
-      const u8 = new Uint8Array(JSON.parse(savedData));
-      this.db = new SQL.Database(u8);
-    } else {
-      this.db = new SQL.Database();
-      this.createTables();
+    let wasmBinary: ArrayBuffer | null = null;
+    let lastError: any = null;
+
+    for (const url of cdns) {
+      try {
+        console.log(`Nexus: Attempting to fetch SQL WASM from ${url}`);
+        const response = await fetch(url);
+        if (response.ok) {
+          wasmBinary = await response.arrayBuffer();
+          console.log(`Nexus: SQL WASM fetched successfully from ${url} (${wasmBinary.byteLength} bytes)`);
+          break;
+        } else {
+          console.warn(`Nexus: Failed to fetch from ${url}: ${response.status} ${response.statusText}`);
+          lastError = new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+      } catch (err: any) {
+        console.warn(`Nexus: Error fetching from ${url}:`, err);
+        lastError = err;
+      }
+    }
+
+    if (!wasmBinary) {
+      throw new Error(`Failed to fetch SQL WASM from all CDNs. Last error: ${lastError?.message || 'Unknown error'}`);
+    }
+
+    try {
+      const SQL = await initSqlJs({
+        wasmBinary: wasmBinary
+      });
+      console.log("Nexus: SQL.js initialized successfully");
+
+      // Try to load from IndexedDB or start fresh
+      const savedData = localStorage.getItem('nexus_sqlite_db');
+      if (savedData) {
+        const u8 = new Uint8Array(JSON.parse(savedData));
+        this.db = new SQL.Database(u8);
+      } else {
+        this.db = new SQL.Database();
+        this.createTables();
+      }
+    } catch (err: any) {
+      console.error("Nexus: Failed to initialize sql.js with binary:", err);
+      throw err;
     }
   }
 
@@ -58,6 +87,13 @@ export class LocalDB {
         transcript TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS chat_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT,
+        content TEXT,
+        engine TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
     `);
     this.save();
   }
@@ -70,9 +106,15 @@ export class LocalDB {
   }
 
   public run(sql: string, params?: any[]) {
-    if (!this.db) return;
+    if (!this.db) return null;
     this.db.run(sql, params);
     this.save();
+    try {
+      const res = this.db.exec("SELECT last_insert_rowid()");
+      return res[0].values[0][0] as number;
+    } catch (e) {
+      return null;
+    }
   }
 
   public query(sql: string, params?: any[]) {
