@@ -5,10 +5,14 @@ import {
   Download, Globe, Wifi, WifiOff, Shield, Save, Trash2,
   ChevronLeft, ChevronRight, Play, Square, Copy, ExternalLink,
   CheckCircle, AlertTriangle, Info, X, Search, Plus, RotateCcw,
-  Volume2, Send, Trash, Check, AlertCircle, RefreshCw, Zap
+  Volume2, Send, Trash, Check, AlertCircle, RefreshCw, Zap, Brain,
+  Maximize2, Minimize2, FileUp, Languages
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import ReactMarkdown from 'react-markdown';
+import { jsPDF } from "jspdf";
+import { Document, Packer, Paragraph, TextRun } from "docx";
+import { saveAs } from "file-saver";
 import { HybridAIEngine, AIMessage } from "../lib/ai-engine";
 import { LocalDB } from "../lib/local-db";
 import axios from "axios";
@@ -155,8 +159,24 @@ export default function AdvocatePortal() {
   const [deskInput, setDeskInput] = useState('');
   const [deskLoading, setDeskLoading] = useState(false);
   const [deskChatHistory, setDeskChatHistory] = useState<any[]>([
-    { role: 'ai', text: "Welcome to the Writing Desk. I can help you draft petitions and plaints. Use the AI chat on the right for suggestions." }
+    { role: 'ai', text: "Welcome to the Writing Desk. I can help you draft petitions and plaints. Provide facts of the case to get started." }
   ]);
+
+  // Writing Desk Enhanced States
+  const [writingPad, setWritingPad] = useState('');
+  const [caseFacts, setCaseFacts] = useState('');
+  const [draftingModel, setDraftingModel] = useState<string | null>(null);
+  const [aiSuggestions, setAiSuggestions] = useState<string[]>([]);
+  const [aiQuestions, setAiQuestions] = useState<string[]>([]);
+  const [isRecordingFacts, setIsRecordingFacts] = useState(false);
+  const [maximizedColumn, setMaximizedColumn] = useState<'none' | 'inputs' | 'editor' | 'assistant'>('none');
+
+  // --- Document Converter State ---
+  const [converterInputText, setConverterInputText] = useState("");
+  const [converterTranslatedText, setConverterTranslatedText] = useState("");
+  const [converterTargetLang, setConverterTargetLang] = useState("ml-IN"); // Default to Malayalam
+  const [isConverting, setIsConverting] = useState(false);
+  const [converterPhase, setConverterPhase] = useState<'idle' | 'scanning' | 'translating'>('idle');
 
   // Voice AI Dock
   const [voiceAiOn, setVoiceAiOn] = useState(false);
@@ -391,7 +411,8 @@ export default function AdvocatePortal() {
       const response = await aiEngine.generateResponse(
         text, 
         chatHistory, 
-        undefined, 
+        undefined, // forcedEngine
+        undefined, // imageBase64
         abortControllerRef.current.signal,
         (status) => setVoiceAiStatus(status)
       );
@@ -426,7 +447,8 @@ export default function AdvocatePortal() {
       const response = await aiEngine.generateResponse(
         text, 
         [], 
-        undefined, 
+        'gemini', // Gemini is the voice assistant helping the advocate
+        undefined, // imageBase64
         abortControllerRef.current.signal,
         (status) => setVoiceAiStatus(status)
       );
@@ -464,33 +486,156 @@ export default function AdvocatePortal() {
   const handleAutoAnswer = async (call: any) => {
     setIsAnswering(true);
     const instructions = tempInstructions.filter(i => i.active).map(i => i.text).join(". ");
-    const aiResponse = `Hello, this is the AI Assistant for Advocate. Regarding your call: ${instructions || "The advocate is currently busy, but I can take a message or provide basic guidance based on your previous cases."}`;
+    const prompt = `A client named ${call.clientName} is calling. 
+    Current Instructions: ${instructions || "The advocate is currently busy, but I can take a message or provide basic guidance based on your previous cases."}
     
-    const updatedCall = {
-      ...call,
-      duration: "45s",
-      transcript: [
-        { role: "client", text: "Hello? Is the advocate there?" },
-        { role: "ai", text: aiResponse }
-      ],
-      summary: "AI Auto-Answered: Provided temporary instructions to client."
-    };
+    Please provide a professional, helpful response as the AI Assistant for the advocate. Keep it concise.`;
 
-    setTimeout(() => {
-      setIncomingCall(null);
-      setIsAnswering(false);
+    try {
+      const response = await aiEngine.generateResponse(prompt, [], 'sarvam');
+      const aiResponse = response.text;
+      
+      const updatedCall = {
+        ...call,
+        duration: "45s",
+        transcript: [
+          { role: "client", text: "Hello? Is the advocate there?" },
+          { role: "ai", text: aiResponse }
+        ],
+        summary: `AI Auto-Answered (Sarvam): ${aiResponse.substring(0, 50)}...`
+      };
+
+      // In a real app, we'd add to SIMULATED_CALLS or DB
       setNotifications(prev => [{
         id: Date.now(),
-        message: `AI Auto-Answered a call from ${call.clientName}. Check logs for details.`,
+        message: `AI Auto-Answered a call from ${call.clientName} using Sarvam.`,
         date: new Date().toISOString().split('T')[0],
         read: false,
         type: 'call'
       }, ...prev]);
-      // In a real app, we'd add to SIMULATED_CALLS or DB
-    }, 4000);
+      
+      // Speak the response
+      speakResponse(aiResponse);
+    } catch (err) {
+      console.error("Auto-answer failed:", err);
+    } finally {
+      setTimeout(() => {
+        setIncomingCall(null);
+        setIsAnswering(false);
+      }, 4000);
+    }
   };
 
-  // --- Camera / OCR Logic ---
+  // --- Document Converter Logic ---
+  const handleConverterFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setConverterPhase('scanning');
+    setVoiceAiStatus("Reading File...");
+    
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const base64 = event.target?.result as string;
+      try {
+        const text = await aiEngine.performOCR(base64);
+        if (text && text.trim().length > 0) {
+          setConverterInputText(text);
+          setNotifications(prev => [{ id: Date.now(), message: "Document text extracted successfully.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+        } else {
+          setNotifications(prev => [{ id: Date.now(), message: "No clear text found in the uploaded file.", date: new Date().toISOString().split('T')[0], read: false, type: 'warning' }, ...prev]);
+        }
+      } catch (err) {
+        console.error("OCR failed:", err);
+        setNotifications(prev => [{ id: Date.now(), message: "Failed to read document.", date: new Date().toISOString().split('T')[0], read: false, type: 'error' }, ...prev]);
+      } finally {
+        setConverterPhase('idle');
+        setVoiceAiStatus("");
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleConverterCapture = async () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    setConverterPhase('scanning');
+    setVoiceAiStatus("Capturing Image...");
+    
+    const context = canvasRef.current.getContext('2d');
+    canvasRef.current.width = videoRef.current.videoWidth;
+    canvasRef.current.height = videoRef.current.videoHeight;
+    context?.drawImage(videoRef.current, 0, 0);
+    const imageBase64 = canvasRef.current.toDataURL('image/jpeg');
+    
+    try {
+      const text = await aiEngine.performOCR(imageBase64);
+      if (text && text.trim().length > 0) {
+        setConverterInputText(text);
+        setNotifications(prev => [{ id: Date.now(), message: "Document captured and read.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+      } else {
+        setNotifications(prev => [{ id: Date.now(), message: "No clear text found. Try adjusting the camera or lighting.", date: new Date().toISOString().split('T')[0], read: false, type: 'warning' }, ...prev]);
+      }
+    } catch (err) {
+      console.error("Capture OCR failed:", err);
+    } finally {
+      setConverterPhase('idle');
+      setVoiceAiStatus("");
+    }
+  };
+
+  const handleTranslateDoc = async () => {
+    if (!converterInputText.trim()) return;
+    setIsConverting(true);
+    setConverterPhase('translating');
+    setVoiceAiStatus("Translating (Sarvam Mayura)...");
+    
+    try {
+      const translated = await aiEngine.sarvamTranslate(converterInputText, converterTargetLang);
+      if (translated) {
+        setConverterTranslatedText(translated);
+        setNotifications(prev => [{ id: Date.now(), message: "Document translated successfully.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+      }
+    } catch (err) {
+      console.error("Translation failed:", err);
+    } finally {
+      setIsConverting(false);
+      setConverterPhase('idle');
+      setVoiceAiStatus("");
+    }
+  };
+
+  const downloadAsPDF = (text: string, filename: string) => {
+    const doc = new jsPDF();
+    const splitText = doc.splitTextToSize(text, 180);
+    doc.text(splitText, 15, 15);
+    doc.save(`${filename}.pdf`);
+  };
+
+  const downloadAsWord = async (text: string, filename: string) => {
+    const doc = new Document({
+      sections: [{
+        properties: {},
+        children: [
+          new Paragraph({
+            children: [new TextRun(text)],
+          }),
+        ],
+      }],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    saveAs(blob, `${filename}.docx`);
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setNotifications(prev => [{ id: Date.now(), message: "Copied to clipboard.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+  };
+
+  const deleteConverterDoc = () => {
+    setConverterInputText("");
+    setConverterTranslatedText("");
+    setNotifications(prev => [{ id: Date.now(), message: "Document cleared.", date: new Date().toISOString().split('T')[0], read: false, type: 'info' }, ...prev]);
+  };
   const startScan = async () => {
     setScanError(''); setScanPhase('starting');
     try {
@@ -522,32 +667,48 @@ export default function AdvocatePortal() {
         setScanProgress(10 + Math.round(progress * 0.4)); // 10% to 50%
       });
 
-      if (!extractedText || extractedText.trim().length < 5) {
-        throw new Error("No clear text found in the document.");
+      setScannedText(extractedText || "");
+      setScanProgress(60);
+      setVoiceAiStatus("Sarvam Vision is reading...");
+
+      // Now use Sarvam Vision to analyze the document image
+      const visionPrompt = `I have scanned a legal document. Please analyze this document, identify the parties involved, the main obligations, and any potential legal risks. Use a professional legal tone.`;
+
+      const visionResponse = await aiEngine.sarvamVision(visionPrompt, imageBase64);
+      
+      if (visionResponse) {
+        setScannedText(prev => {
+          const baseText = prev ? `--- EXTRACTED TEXT ---\n${prev}\n\n` : "";
+          return `${baseText}--- SARVAM VISION ANALYSIS ---\n${visionResponse}`;
+        });
+        speakResponse(visionResponse);
+      } else if (extractedText && extractedText.trim().length >= 5) {
+        // Fallback to Gemma 3 if Sarvam Vision fails but we have OCR text
+        setVoiceAiStatus("Gemma 3 is reading...");
+        const gemmaPrompt = `I have scanned a legal document. Here is the extracted text:
+        
+        --- START OF TEXT ---
+        ${extractedText}
+        --- END OF TEXT ---
+        
+        Please analyze this document, identify the parties involved, the main obligations, and any potential legal risks. Use a professional legal tone.`;
+
+        const response = await aiEngine.generateResponse(
+          gemmaPrompt, 
+          [], 
+          'ollama', // Force Gemma 3
+          undefined, 
+          undefined, 
+          (status) => setVoiceAiStatus(status)
+        );
+
+        setScannedText(prev => `--- EXTRACTED TEXT ---\n${prev}\n\n--- GEMMA 3 ANALYSIS ---\n${response.text}`);
+        speakResponse(response.text);
+      } else {
+        // Both failed
+        throw new Error("No clear text found and AI analysis failed. Please ensure the document is well-lit and clearly visible.");
       }
 
-      setScannedText(extractedText);
-      setScanProgress(60);
-      setVoiceAiStatus("Gemma 3 is reading...");
-
-      // Now use Gemma to "read" and analyze the extracted text
-      const prompt = `I have scanned a legal document. Here is the extracted text:
-      
-      --- START OF TEXT ---
-      ${extractedText}
-      --- END OF TEXT ---
-      
-      Please analyze this document, identify the parties involved, the main obligations, and any potential legal risks. Use a professional legal tone.`;
-
-      const response = await aiEngine.generateResponse(
-        prompt, 
-        [], 
-        undefined, // No image here, we use the extracted text
-        undefined,
-        (status) => setVoiceAiStatus(status)
-      );
-
-      setScannedText(prev => `--- EXTRACTED TEXT ---\n${prev}\n\n--- AI ANALYSIS ---\n${response.text}`);
       setScanPhase('done');
       setScanProgress(100);
     } catch (err: any) {
@@ -587,10 +748,6 @@ export default function AdvocatePortal() {
       .trim();
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-  };
-
   const downloadResponse = (text: string, filename: string = 'ai_response.txt') => {
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -599,6 +756,172 @@ export default function AdvocatePortal() {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  // --- Writing Desk Enhanced Logic ---
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setDraftingModel(event.target?.result as string);
+        setNotifications(prev => [{
+          id: Date.now(),
+          message: `Drafting model "${file.name}" uploaded successfully.`,
+          date: new Date().toISOString().split('T')[0],
+          read: false,
+          type: 'info'
+        }, ...prev]);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const handleDownloadDraft = () => {
+    const text = draftPages.join('\n\n---\n\n');
+    downloadResponse(text, `Case_Draft_${Date.now()}.txt`);
+  };
+
+  const generateDraft = async () => {
+    if (!caseFacts.trim() && !writingPad.trim()) {
+      setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Please provide some facts or notes in the writing pad first.", engine: 'Nexus AI' }]);
+      return;
+    }
+    
+    setDeskLoading(true);
+    setVoiceAiStatus("Sarvam AI is drafting...");
+    
+    const prompt = `Draft a legal petition/plaint based on the following facts:
+    
+    FACTS:
+    ${caseFacts}
+    
+    NOTES:
+    ${writingPad}
+    
+    ${draftingModel ? `USE THIS MODEL/TEMPLATE AS A GUIDE:\n${draftingModel}` : ''}
+    
+    Please provide a professional legal draft.`;
+
+    try {
+      // Force Sarvam for drafting
+      const response = await aiEngine.generateResponse(prompt, [], 'sarvam', undefined, undefined, (status) => setVoiceAiStatus(status));
+      setDraftPages([response.text]);
+      setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Draft generated by Sarvam AI. Check the main editor.", engine: 'Sarvam AI' }]);
+      
+      // Get suggestions after drafting
+      getAiSuggestions(response.text);
+    } catch (err) {
+      console.error(err);
+      setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Drafting failed. Please try again.", engine: 'Error' }]);
+    } finally {
+      setDeskLoading(false);
+      setVoiceAiStatus("");
+    }
+  };
+
+  const getAiSuggestions = async (draft: string) => {
+    setVoiceAiStatus("Gemini is analyzing...");
+    const prompt = `Analyze this legal draft and provide 3-4 specific suggestions for improvement or missing legal points. Format as a list.
+    
+    DRAFT:
+    ${draft}`;
+
+    try {
+      // Force Gemini for suggestions
+      const response = await aiEngine.generateResponse(prompt, [], 'gemini', undefined, undefined, (status) => setVoiceAiStatus(status));
+      const suggestions = response.text.split('\n').filter(s => s.trim().length > 5).slice(0, 4);
+      setAiSuggestions(suggestions);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const getAiGuidance = async () => {
+    if (!caseFacts.trim()) return;
+    setVoiceAiStatus("Gemini is preparing questions...");
+    const prompt = `Based on the facts provided, ask 3 legally relevant questions to help the advocate refine the drafting.
+    
+    FACTS:
+    ${caseFacts}`;
+
+    try {
+      // Force Gemini for guidance
+      const response = await aiEngine.generateResponse(prompt, [], 'gemini', undefined, undefined, (status) => setVoiceAiStatus(status));
+      const questions = response.text.split('\n').filter(q => q.trim().length > 5).slice(0, 3);
+      setAiQuestions(questions);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const integrateSuggestion = async (suggestion: string) => {
+    setDeskLoading(true);
+    setVoiceAiStatus("Sarvam is integrating suggestion...");
+    const prompt = `Update the following legal draft by integrating this suggestion: "${suggestion}"
+    
+    CURRENT DRAFT:
+    ${draftPages[0]}`;
+
+    try {
+      const response = await aiEngine.generateResponse(prompt, [], 'sarvam', undefined, undefined, (status) => setVoiceAiStatus(status));
+      setDraftPages([response.text]);
+      setAiSuggestions(prev => prev.filter(s => s !== suggestion));
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setDeskLoading(false);
+      setVoiceAiStatus("");
+    }
+  };
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
+  const toggleRecordFacts = async () => {
+    if (isRecordingFacts) {
+      if (mediaRecorderRef.current) {
+        mediaRecorderRef.current.stop();
+      }
+      setIsRecordingFacts(false);
+      setVoiceAiStatus("");
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
+        audioChunksRef.current = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+
+        mediaRecorder.onstop = async () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+          const reader = new FileReader();
+          reader.readAsDataURL(audioBlob);
+          reader.onloadend = async () => {
+            const base64Audio = (reader.result as string).split(',')[1];
+            setVoiceAiStatus("Sarvam STT is transcribing...");
+            const transcript = await aiEngine.sarvamSTT(base64Audio);
+            if (transcript) {
+              setCaseFacts(prev => prev + (prev ? ' ' : '') + transcript);
+            }
+            setVoiceAiStatus("");
+          };
+          stream.getTracks().forEach(track => track.stop());
+        };
+
+        mediaRecorder.start();
+        setIsRecordingFacts(true);
+        setVoiceAiStatus("Recording facts (Sarvam STT)...");
+      } catch (err) {
+        console.error("Failed to start recording:", err);
+        alert("Microphone access denied or not supported.");
+      }
+    }
   };
 
   const deleteMessage = (index: number) => {
@@ -613,10 +936,42 @@ export default function AdvocatePortal() {
     setDeskChatHistory(prev => prev.filter((_, i) => i !== index));
   };
 
-  const speakResponse = useCallback((text: string) => {
+  const speakResponse = useCallback(async (text: string) => {
     if (!text) return;
     
-    // Cancel any ongoing speech to prevent overlap
+    // Try Sarvam TTS (Bulbul V3) first
+    const sarvamAudio = await aiEngine.sarvamTTS(text);
+    if (sarvamAudio) {
+      console.log("Using Sarvam TTS (Bulbul V3) for speech.");
+      const audio = new Audio(`data:audio/wav;base64,${sarvamAudio}`);
+      audio.onplay = () => {
+        setVoiceAiSpeaking(true);
+        isSpeakingRef.current = true;
+      };
+      audio.onended = () => {
+        setVoiceAiSpeaking(false);
+        isSpeakingRef.current = false;
+      };
+      audio.onerror = (e) => {
+        console.error("Sarvam TTS playback error:", e);
+        setVoiceAiSpeaking(false);
+        isSpeakingRef.current = false;
+        // Fallback to browser TTS if Sarvam playback fails
+        fallbackToBrowserTTS(text);
+      };
+      audio.play().catch(e => {
+        console.error("Sarvam TTS play failed:", e);
+        fallbackToBrowserTTS(text);
+      });
+      return;
+    }
+
+    // Fallback to browser TTS
+    fallbackToBrowserTTS(text);
+  }, []);
+
+  const fallbackToBrowserTTS = (text: string) => {
+    console.log("Falling back to Browser TTS.");
     window.speechSynthesis.cancel();
     
     // Set speaking state immediately
@@ -654,11 +1009,10 @@ export default function AdvocatePortal() {
       isSpeakingRef.current = false;
     };
     
-    // Small delay to ensure cancel() has finished
     setTimeout(() => {
       window.speechSynthesis.speak(utterance);
     }, 50);
-  }, []);
+  };
 
   const isProcessingRef = useRef(false);
 
@@ -717,6 +1071,7 @@ export default function AdvocatePortal() {
       const response = await aiEngine.generateResponse(
         text, 
         chatHistory, 
+        undefined, // forcedEngine
         imageBase64, 
         abortControllerRef.current.signal,
         (status) => setVoiceAiStatus(status)
@@ -1827,59 +2182,312 @@ export default function AdvocatePortal() {
 
             {/* DOC CONVERTER */}
             {view === 'doc-converter' && (
-              <motion.div key="converter" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', padding: 24 }}>
-                <h2 style={{ fontSize: 24, fontWeight: 900, fontStyle: 'italic', marginBottom: 20 }}>Document Converter</h2>
-                <div style={S.card}>
-                  <p style={{ color: '#475569' }}>Multi-page scanning and conversion tools.</p>
+              <motion.div key="converter" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h2 style={{ fontSize: 24, fontWeight: 900, fontStyle: 'italic' }}>Document Converter & Translator</h2>
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    <div style={{ position: 'relative' }}>
+                      <input type="file" onChange={handleConverterFileUpload} style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }} />
+                      <button style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: 'rgba(99,102,241,.1)', border: '1px solid rgba(99,102,241,.2)', borderRadius: 12, color: '#6366f1', fontSize: 12, fontWeight: 900 }}>
+                        <FileUp size={16} /> Upload Document
+                      </button>
+                    </div>
+                    <button onClick={handleConverterCapture} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 12, color: '#10b981', fontSize: 12, fontWeight: 900 }}>
+                      <Camera size={16} /> Capture from Camera
+                    </button>
+                    <button onClick={deleteConverterDoc} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.2)', borderRadius: 12, color: '#ef4444', fontSize: 12, fontWeight: 900 }}>
+                      <Trash2 size={16} /> Clear All
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, overflow: 'hidden' }}>
+                  {/* Input Side */}
+                  <div style={{ ...S.card, display: 'flex', flexDirection: 'column', padding: 0 }}>
+                    <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Original Document Text</span>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => copyToClipboard(converterInputText)} style={{ padding: 6, color: '#64748b' }}><Copy size={14} /></button>
+                        <button onClick={() => downloadAsPDF(converterInputText, 'Original_Doc')} style={{ padding: 6, color: '#64748b' }}><FileText size={14} /></button>
+                        <button onClick={() => downloadAsWord(converterInputText, 'Original_Doc')} style={{ padding: 6, color: '#64748b' }}><Download size={14} /></button>
+                      </div>
+                    </div>
+                    <textarea 
+                      value={converterInputText}
+                      onChange={e => setConverterInputText(e.target.value)}
+                      placeholder="Extracted text will appear here..."
+                      style={{ flex: 1, background: 'transparent', border: 'none', padding: 20, color: '#cbd5e1', fontSize: 13, lineHeight: 1.8, resize: 'none' }}
+                    />
+                  </div>
+
+                  {/* Output Side */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                    {/* Translation Controls */}
+                    <div style={{ ...S.card, padding: 16, display: 'flex', alignItems: 'center', gap: 16 }}>
+                      <Languages size={20} className="text-indigo-500" />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', marginBottom: 4 }}>Target Language</div>
+                        <select 
+                          value={converterTargetLang}
+                          onChange={e => setConverterTargetLang(e.target.value)}
+                          style={{ width: '100%', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, color: '#fff', fontSize: 12, padding: '8px' }}
+                        >
+                          <option value="ml-IN">Malayalam</option>
+                          <option value="hi-IN">Hindi</option>
+                          <option value="ta-IN">Tamil</option>
+                          <option value="te-IN">Telugu</option>
+                          <option value="kn-IN">Kannada</option>
+                          <option value="gu-IN">Gujarati</option>
+                          <option value="mr-IN">Marathi</option>
+                          <option value="bn-IN">Bengali</option>
+                        </select>
+                      </div>
+                      <button 
+                        onClick={handleTranslateDoc}
+                        disabled={isConverting || !converterInputText}
+                        style={{ padding: '12px 24px', background: '#6366f1', border: 'none', borderRadius: 12, color: '#fff', fontWeight: 900, fontSize: 12, cursor: 'pointer', opacity: (isConverting || !converterInputText) ? 0.5 : 1 }}
+                      >
+                        {isConverting ? 'Translating...' : 'Translate (Sarvam)'}
+                      </button>
+                    </div>
+
+                    {/* Translated Area */}
+                    <div style={{ ...S.card, flex: 1, display: 'flex', flexDirection: 'column', padding: 0 }}>
+                      <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Translated Document Text</span>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button onClick={() => copyToClipboard(converterTranslatedText)} style={{ padding: 6, color: '#64748b' }}><Copy size={14} /></button>
+                          <button onClick={() => downloadAsPDF(converterTranslatedText, 'Translated_Doc')} style={{ padding: 6, color: '#64748b' }}><FileText size={14} /></button>
+                          <button onClick={() => downloadAsWord(converterTranslatedText, 'Translated_Doc')} style={{ padding: 6, color: '#64748b' }}><Download size={14} /></button>
+                        </div>
+                      </div>
+                      <textarea 
+                        value={converterTranslatedText}
+                        onChange={e => setConverterTranslatedText(e.target.value)}
+                        placeholder="Translated text will appear here..."
+                        style={{ flex: 1, background: 'transparent', border: 'none', padding: 20, color: '#cbd5e1', fontSize: 13, lineHeight: 1.8, resize: 'none' }}
+                      />
+                    </div>
+                  </div>
                 </div>
               </motion.div>
             )}
 
             {/* WRITING DESK */}
             {view === 'writing-desk' && (
-              <motion.div key="writing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', overflow: 'hidden' }}>
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid rgba(255,255,255,.05)' }}>
-                  <div style={{ height: 48, background: '#0a0f1d', borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
-                    <span style={{ fontSize: 10, fontWeight: 900, color: '#6366f1' }}>Page {currentPage}</span>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <button onClick={() => setDraftEditMode(!draftEditMode)} style={{ padding: '4px 10px', background: 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.2)', borderRadius: 8, color: '#f59e0b', fontSize: 10, fontWeight: 900 }}>Edit</button>
+              <motion.div key="writing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', overflow: 'hidden', background: '#020617' }}>
+                
+                {/* Column 1: Advocate Inputs */}
+                <div style={{ 
+                  width: maximizedColumn === 'inputs' ? '100%' : (maximizedColumn === 'none' ? 350 : 0), 
+                  display: (maximizedColumn === 'none' || maximizedColumn === 'inputs') ? 'flex' : 'none',
+                  borderRight: '1px solid rgba(255,255,255,.05)', 
+                  flexDirection: 'column', 
+                  background: '#070b14',
+                  transition: 'all 0.3s ease'
+                }}>
+                  <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Edit3 size={14} className="text-indigo-500" />
+                      <h3 style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: 1 }}>Advocate Inputs</h3>
                     </div>
+                    <button 
+                      onClick={() => setMaximizedColumn(maximizedColumn === 'inputs' ? 'none' : 'inputs')}
+                      style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}
+                      title={maximizedColumn === 'inputs' ? "Minimize" : "Enlarge"}
+                    >
+                      {maximizedColumn === 'inputs' ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                    </button>
                   </div>
-                  <div style={{ flex: 1, background: '#0d1117', padding: 40, overflowY: 'auto' }}>
-                    <pre style={{ fontFamily: "'Courier New', monospace", fontSize: 13, lineHeight: 1.8, color: '#cbd5e1', whiteSpace: 'pre-wrap' }}>{draftPages[0]}</pre>
-                  </div>
-                </div>
-                <div style={{ width: 320, background: '#070b14', display: 'flex', flexDirection: 'column' }}>
-                  <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,.05)' }}>
-                    <h3 style={{ fontSize: 10, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase' }}>AI Drafting Assistant</h3>
-                  </div>
-                  <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    {deskChatHistory.map((msg, i) => (
-                      <div key={i} style={{ padding: 12, borderRadius: 12, background: msg.role === 'ai' ? 'rgba(255,255,255,.03)' : 'rgba(99,102,241,.1)', border: '1px solid rgba(255,255,255,.05)' }}>
-                        <div style={{ fontSize: 11, color: '#94a3b8' }}>{msg.text}</div>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8, borderTop: '1px solid rgba(255,255,255,.05)', paddingTop: 6, gap: 10 }}>
-                          <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                            {msg.role === 'user' ? 'You' : (msg.engine || 'Nexus AI')}
-                          </span>
-                          <div style={{ display: 'flex', gap: 8, opacity: 0.5 }}>
-                            {msg.role === 'ai' && (
-                              <>
-                                <button onClick={() => copyToClipboard(msg.text)} title="Copy" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
-                                  <Copy size={10} />
-                                </button>
-                                <button onClick={() => downloadResponse(msg.text)} title="Download" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
-                                  <Download size={10} />
-                                </button>
-                              </>
-                            )}
-                            <button onClick={() => deleteDeskMessage(i)} title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444' }}>
-                              <Trash2 size={10} />
-                            </button>
-                          </div>
+                  
+                  <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 20 }}>
+                    {/* Temporary Writing Pad */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <label style={{ fontSize: 9, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Temporary Writing Pad</label>
+                        <button onClick={() => setWritingPad('')} style={{ fontSize: 8, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer' }}>Clear</button>
+                      </div>
+                      <textarea 
+                        value={writingPad} 
+                        onChange={e => setWritingPad(e.target.value)}
+                        placeholder="Free notes, quick points..."
+                        style={{ width: '100%', height: 120, background: 'rgba(255,255,255,.03)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 12, padding: 12, fontSize: 12, resize: 'none', lineHeight: 1.6 }}
+                      />
+                    </div>
+
+                    {/* Facts of the Case */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <label style={{ fontSize: 9, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Facts of the Case</label>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button 
+                            onClick={toggleRecordFacts}
+                            style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 8, color: isRecordingFacts ? '#ef4444' : '#6366f1', background: 'none', border: 'none', cursor: 'pointer' }}
+                          >
+                            <Mic size={10} className={isRecordingFacts ? 'animate-pulse' : ''} />
+                            {isRecordingFacts ? 'Recording...' : 'Voice'}
+                          </button>
                         </div>
                       </div>
-                    ))}
+                      <textarea 
+                        value={caseFacts} 
+                        onChange={e => setCaseFacts(e.target.value)}
+                        placeholder="Describe the client's story/facts..."
+                        style={{ width: '100%', height: 180, background: 'rgba(255,255,255,.03)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 12, padding: 12, fontSize: 12, resize: 'none', lineHeight: 1.6 }}
+                      />
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button 
+                          onClick={() => {
+                            setNotifications(prev => [{ id: Date.now(), message: "Facts saved to local session.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+                            getAiGuidance();
+                          }}
+                          style={{ flex: 1, padding: '8px', background: 'rgba(99,102,241,.1)', border: '1px solid rgba(99,102,241,.2)', borderRadius: 8, color: '#6366f1', fontSize: 10, fontWeight: 900, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                        >
+                          <Save size={12} /> Save & Get Guidance
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Model Upload */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <label style={{ fontSize: 9, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Drafting Model / Template</label>
+                      <div style={{ position: 'relative' }}>
+                        <input 
+                          type="file" 
+                          onChange={handleFileUpload}
+                          style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', zIndex: 2 }}
+                        />
+                        <div style={{ padding: '12px', background: draftingModel ? 'rgba(16,185,129,.05)' : 'rgba(255,255,255,.02)', border: '1px dashed rgba(255,255,255,.1)', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: draftingModel ? '#10b981' : '#475569' }}>
+                          <Plus size={14} />
+                          <span style={{ fontSize: 11 }}>{draftingModel ? 'Model Uploaded' : 'Upload Template'}</span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
+
+                  <div style={{ padding: 16, borderTop: '1px solid rgba(255,255,255,.05)' }}>
+                    <button 
+                      onClick={generateDraft}
+                      disabled={deskLoading}
+                      style={{ width: '100%', padding: '14px', background: '#f59e0b', border: 'none', borderRadius: 12, color: '#000', fontWeight: 900, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, opacity: deskLoading ? 0.5 : 1 }}
+                    >
+                      {deskLoading ? <RotateCcw size={16} className="spin" /> : <Zap size={16} />}
+                      Generate Draft (Sarvam)
+                    </button>
+                  </div>
+                </div>
+
+                {/* Column 2: Draft Editor */}
+                <div style={{ 
+                  flex: 1, 
+                  display: (maximizedColumn === 'none' || maximizedColumn === 'editor') ? 'flex' : 'none', 
+                  flexDirection: 'column', 
+                  borderRight: '1px solid rgba(255,255,255,.05)',
+                  transition: 'all 0.3s ease'
+                }}>
+                  <div style={{ height: 48, background: '#0a0f1d', borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <FileText size={14} className="text-indigo-500" />
+                      <span style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase' }}>Legal Draft Editor</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button 
+                        onClick={() => setMaximizedColumn(maximizedColumn === 'editor' ? 'none' : 'editor')}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, color: '#cbd5e1', fontSize: 10, fontWeight: 900 }}
+                        title={maximizedColumn === 'editor' ? "Minimize" : "Enlarge"}
+                      >
+                        {maximizedColumn === 'editor' ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+                        {maximizedColumn === 'editor' ? 'Minimize' : 'Enlarge'}
+                      </button>
+                      <button onClick={handleDownloadDraft} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, color: '#cbd5e1', fontSize: 10, fontWeight: 900 }}>
+                        <Download size={12} /> Download
+                      </button>
+                      <button onClick={() => setDraftEditMode(!draftEditMode)} style={{ padding: '6px 12px', background: draftEditMode ? '#f59e0b' : 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.2)', borderRadius: 8, color: draftEditMode ? '#000' : '#f59e0b', fontSize: 10, fontWeight: 900 }}>
+                        {draftEditMode ? 'Save' : 'Edit'}
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ flex: 1, background: '#0d1117', padding: 40, overflowY: 'auto', position: 'relative' }}>
+                    {draftEditMode ? (
+                      <textarea 
+                        value={draftPages[0]}
+                        onChange={e => setDraftPages([e.target.value])}
+                        style={{ width: '100%', height: '100%', background: 'transparent', border: 'none', color: '#cbd5e1', fontFamily: "'Courier New', monospace", fontSize: 13, lineHeight: 1.8, resize: 'none' }}
+                      />
+                    ) : (
+                      <div className="markdown-body">
+                        <ReactMarkdown>{draftPages[0]}</ReactMarkdown>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Column 3: AI Assistant */}
+                <div style={{ 
+                  width: maximizedColumn === 'assistant' ? '100%' : (maximizedColumn === 'none' ? 320 : 0), 
+                  display: (maximizedColumn === 'none' || maximizedColumn === 'assistant') ? 'flex' : 'none',
+                  background: '#070b14', 
+                  flexDirection: 'column',
+                  transition: 'all 0.3s ease'
+                }}>
+                  <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Zap size={14} className="text-indigo-500" />
+                      <h3 style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: 1 }}>AI Assistant</h3>
+                    </div>
+                    <button 
+                      onClick={() => setMaximizedColumn(maximizedColumn === 'assistant' ? 'none' : 'assistant')}
+                      style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}
+                      title={maximizedColumn === 'assistant' ? "Minimize" : "Enlarge"}
+                    >
+                      {maximizedColumn === 'assistant' ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                    </button>
+                  </div>
+                  
+                  <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    
+                    {/* Guidance Questions (Gemini) */}
+                    {aiQuestions.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        <div style={{ fontSize: 9, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase' }}>Gemini's Guidance</div>
+                        {aiQuestions.map((q, i) => (
+                          <div key={i} style={{ padding: 12, background: 'rgba(99,102,241,.05)', border: '1px solid rgba(99,102,241,.1)', borderRadius: 12, fontSize: 11, color: '#cbd5e1', lineHeight: 1.5 }}>
+                            {q}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Suggestions (Gemini) */}
+                    {aiSuggestions.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        <div style={{ fontSize: 9, fontWeight: 900, color: '#f59e0b', textTransform: 'uppercase' }}>Draft Suggestions</div>
+                        {aiSuggestions.map((s, i) => (
+                          <div key={i} style={{ padding: 12, background: 'rgba(245,158,11,.05)', border: '1px solid rgba(245,158,11,.1)', borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            <div style={{ fontSize: 11, color: '#cbd5e1', lineHeight: 1.5 }}>{s}</div>
+                            <button 
+                              onClick={() => integrateSuggestion(s)}
+                              style={{ alignSelf: 'flex-end', padding: '4px 8px', background: 'rgba(245,158,11,.2)', border: 'none', borderRadius: 6, color: '#f59e0b', fontSize: 9, fontWeight: 900, cursor: 'pointer' }}
+                            >
+                              Approve & Integrate
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Chat History */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <div style={{ fontSize: 9, fontWeight: 900, color: '#475569', textTransform: 'uppercase' }}>Interaction Log</div>
+                      {deskChatHistory.map((msg, i) => (
+                        <div key={i} style={{ padding: 10, borderRadius: 10, background: msg.role === 'ai' ? 'rgba(255,255,255,.02)' : 'rgba(99,102,241,.05)', border: '1px solid rgba(255,255,255,.03)' }}>
+                          <div style={{ fontSize: 10, color: '#94a3b8' }}>{msg.text}</div>
+                          <div style={{ fontSize: 7, color: '#475569', marginTop: 4, textTransform: 'uppercase' }}>{msg.engine || 'AI'}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
                   <div style={{ padding: 16, borderTop: '1px solid rgba(255,255,255,.05)' }}>
                     {deskLoading && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
@@ -1889,11 +2497,22 @@ export default function AdvocatePortal() {
                           <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce delay-200" />
                         </div>
                         <span style={{ fontSize: 9, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase' }}>
-                          {voiceAiStatus || 'Thinking...'}
+                          {voiceAiStatus || 'Processing...'}
                         </span>
                       </div>
                     )}
-                    <input value={deskInput} onChange={e => setDeskInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendDeskChat()} placeholder="Ask AI to draft..." style={{ width: '100%', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 10, padding: 10, fontSize: 12 }} />
+                    <div style={{ position: 'relative' }}>
+                      <input 
+                        value={deskInput} 
+                        onChange={e => setDeskInput(e.target.value)} 
+                        onKeyDown={e => e.key === 'Enter' && sendDeskChat()} 
+                        placeholder="Ask Gemini for help..." 
+                        style={{ width: '100%', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 10, padding: '10px 35px 10px 12px', fontSize: 12 }} 
+                      />
+                      <button onClick={sendDeskChat} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#6366f1', cursor: 'pointer' }}>
+                        <Send size={14} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </motion.div>

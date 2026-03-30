@@ -74,6 +74,92 @@ async function startServer() {
     }
   });
 
+  // Sarvam TTS (Bulbul V3)
+  app.post("/api/ai/sarvam/tts", async (req, res) => {
+    const { text } = req.body;
+    try {
+      const response = await axios.post("https://api.sarvam.ai/v1/text-to-speech", {
+        inputs: [text],
+        target_language_code: "en-IN",
+        speaker: "meera", // Default speaker
+        model: "bulbul:v3"
+      }, {
+        headers: {
+          "api-subscription-key": process.env.SARVAM_API_KEY,
+          "Content-Type": "application/json"
+        }
+      });
+      res.json(response.data);
+    } catch (error: any) {
+      console.error("Sarvam TTS error:", error.response?.data || error.message);
+      res.status(500).json({ error: "Sarvam TTS failed" });
+    }
+  });
+
+  // Sarvam STT (Saaras V3)
+  app.post("/api/ai/sarvam/stt", async (req, res) => {
+    const { audio_content } = req.body; // base64
+    try {
+      const response = await axios.post("https://api.sarvam.ai/v1/speech-to-text", {
+        model: "saaras:v3",
+        language_code: "en-IN",
+        audio_content
+      }, {
+        headers: {
+          "api-subscription-key": process.env.SARVAM_API_KEY,
+          "Content-Type": "application/json"
+        }
+      });
+      res.json(response.data);
+    } catch (error: any) {
+      console.error("Sarvam STT error:", error.response?.data || error.message);
+      res.status(500).json({ error: "Sarvam STT failed" });
+    }
+  });
+
+  // Sarvam Vision
+  app.post("/api/ai/sarvam/vision", async (req, res) => {
+    const { prompt, imageBase64 } = req.body;
+    try {
+      const response = await axios.post("https://api.sarvam.ai/v1/vision", {
+        model: "sarvam-vision",
+        prompt,
+        image: imageBase64
+      }, {
+        headers: {
+          "api-subscription-key": process.env.SARVAM_API_KEY,
+          "Content-Type": "application/json"
+        }
+      });
+      res.json(response.data);
+    } catch (error: any) {
+      console.error("Sarvam Vision error:", error.response?.data || error.message);
+      res.status(500).json({ error: "Sarvam Vision failed" });
+    }
+  });
+
+  // Sarvam Translation
+  app.post("/api/ai/sarvam/translate", async (req, res) => {
+    const { input, target_language_code, source_language_code } = req.body;
+    try {
+      const response = await axios.post("https://api.sarvam.ai/v1/translate", {
+        input,
+        target_language_code,
+        source_language_code,
+        model: "mayura:v1"
+      }, {
+        headers: {
+          "api-subscription-key": process.env.SARVAM_API_KEY,
+          "Content-Type": "application/json"
+        }
+      });
+      res.json(response.data);
+    } catch (error: any) {
+      console.error("Sarvam Translation error:", error.response?.data || error.message);
+      res.status(500).json({ error: "Sarvam Translation failed" });
+    }
+  });
+
   // Google OAuth for Drive
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,

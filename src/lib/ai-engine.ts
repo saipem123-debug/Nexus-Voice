@@ -175,6 +175,55 @@ export class HybridAIEngine {
     }
   }
 
+  public async sarvamTTS(text: string): Promise<string | null> {
+    try {
+      console.log("Calling Sarvam TTS (Bulbul V3)...");
+      const response = await axios.post('/api/ai/sarvam/tts', { text });
+      // Assuming response contains base64 audio in audios[0] or similar
+      return response.data.audios?.[0] || null;
+    } catch (err) {
+      console.error("Sarvam TTS failed:", err);
+      return null;
+    }
+  }
+
+  public async sarvamSTT(audioBase64: string): Promise<string | null> {
+    try {
+      console.log("Calling Sarvam STT (Saaras V3)...");
+      const response = await axios.post('/api/ai/sarvam/stt', { audio_content: audioBase64 });
+      return response.data.transcript || null;
+    } catch (err) {
+      console.error("Sarvam STT failed:", err);
+      return null;
+    }
+  }
+
+  public async sarvamVision(prompt: string, imageBase64: string): Promise<string | null> {
+    try {
+      console.log("Calling Sarvam Vision...");
+      const response = await axios.post('/api/ai/sarvam/vision', { prompt, imageBase64 });
+      return response.data.text || null;
+    } catch (err) {
+      console.error("Sarvam Vision failed:", err);
+      return null;
+    }
+  }
+
+  public async sarvamTranslate(input: string, targetLang: string, sourceLang: string = "en-IN"): Promise<string | null> {
+    try {
+      console.log(`Calling Sarvam Translation (${sourceLang} -> ${targetLang})...`);
+      const response = await axios.post('/api/ai/sarvam/translate', {
+        input,
+        target_language_code: targetLang,
+        source_language_code: sourceLang
+      });
+      return response.data.translated_text || null;
+    } catch (err) {
+      console.error("Sarvam Translation failed:", err);
+      return null;
+    }
+  }
+
   private async callGemini(prompt: string, history: AIMessage[], imageBase64?: string, signal?: AbortSignal): Promise<string | null> {
     if (!this.genAI) return null;
     try {
@@ -351,6 +400,7 @@ export class HybridAIEngine {
   public async generateResponse(
     prompt: string, 
     history: AIMessage[], 
+    forcedEngine?: 'sarvam' | 'gemini' | 'ollama' | 'transformers',
     imageBase64?: string, 
     signal?: AbortSignal,
     onStatusUpdate?: (status: string) => void
@@ -370,6 +420,30 @@ export class HybridAIEngine {
       const canUseOnline = navigator.onLine && (this.sarvamReady || this.geminiReady);
       
       console.log(`Gemma 3 Orchestrator analyzing task. Complex: ${isComplex}, Online: ${canUseOnline}, Ollama: ${this.ollamaReady}`);
+
+      // 0. Forced Engine Logic
+      if (forcedEngine) {
+        if (forcedEngine === 'sarvam' && this.sarvamReady && canUseOnline) {
+          onStatusUpdate?.("Consulting Sarvam AI (Forced)...");
+          const res = await this.callSarvam(prompt, history, signal);
+          if (res) return { text: res, engine: 'Sarvam AI' };
+        }
+        if (forcedEngine === 'gemini' && this.geminiReady && canUseOnline) {
+          onStatusUpdate?.("Consulting Gemini (Forced)...");
+          const res = await this.callGemini(prompt, history, imageBase64, signal);
+          if (res) return { text: res, engine: 'Gemini 2.5 Flash' };
+        }
+        if (forcedEngine === 'ollama' && this.ollamaReady) {
+          onStatusUpdate?.("Consulting Local Gemma 3 (Forced)...");
+          const res = await this.callLocalOllama(prompt, history, signal);
+          if (res) return { text: res, engine: 'Gemma 3 (Local)' };
+        }
+        if (forcedEngine === 'transformers' && this.transformersReady) {
+          onStatusUpdate?.("Consulting Browser AI (Forced)...");
+          const res = await this.callTransformers(prompt, history, signal);
+          if (res) return { text: res, engine: 'Gemma 3 (Browser)' };
+        }
+      }
 
       // 1. If NOT complex, prioritize local Gemma 3 (Ollama)
       if (!isComplex && this.ollamaReady) {
