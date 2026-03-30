@@ -2119,7 +2119,13 @@ export default function AdvocatePortal() {
 
             {/* SUPPORT */}
             {view === 'support' && (
-              <motion.div key="support" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 24 }}>
+              <motion.div key="support" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 24, position: 'relative' }}>
+                <button 
+                  onClick={() => setView('dashboard')}
+                  style={{ position: 'absolute', top: 24, right: 24, background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}
+                >
+                  <X size={20} />
+                </button>
                 <h2 style={{ fontSize: 26, fontWeight: 900, fontStyle: 'italic', marginBottom: 20 }}>Help Desk</h2>
                 <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {supportMsgs.map(msg => (
@@ -2140,13 +2146,45 @@ export default function AdvocatePortal() {
                       <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', display: scanPhase === 'live' ? 'block' : 'none' }} />
                       <canvas ref={canvasRef} style={{ display: 'none' }} />
                       {scanPhase === 'idle' && <div className="absolute inset-0 flex items-center justify-center text-slate-500">Camera is off</div>}
-                      {scanPhase === 'live' && <div className="absolute top-4 left-4 bg-red-500 text-white px-2 py-1 rounded text-[10px] font-bold uppercase animate-pulse">Live</div>}
+                      {scanPhase === 'live' && (
+                        <>
+                          <div className="absolute top-4 left-4 bg-red-500 text-white px-2 py-1 rounded text-[10px] font-bold uppercase animate-pulse">Live</div>
+                          <button 
+                            onClick={() => { 
+                              setScanPhase('idle'); 
+                              setCamOn(false);
+                              if (videoRef.current?.srcObject) {
+                                (videoRef.current.srcObject as MediaStream).getTracks().forEach(track => track.stop());
+                                videoRef.current.srcObject = null;
+                              }
+                            }} 
+                            style={{ position: 'absolute', top: 12, right: 12, background: 'rgba(0,0,0,0.5)', border: 'none', borderRadius: '50%', width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', cursor: 'pointer' }}
+                          >
+                            <X size={14} />
+                          </button>
+                        </>
+                      )}
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
                       {scanPhase === 'idle' ? (
                         <button onClick={startScan} style={{ flex: 1, padding: 12, background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 12, color: '#10b981', fontWeight: 900 }}>Start Camera</button>
                       ) : (
-                        <button onClick={captureScan} style={{ flex: 1, padding: 12, background: '#10b981', border: 'none', borderRadius: 12, color: '#fff', fontWeight: 900 }}>Capture & Read</button>
+                        <>
+                          <button onClick={captureScan} style={{ flex: 2, padding: 12, background: '#10b981', border: 'none', borderRadius: 12, color: '#fff', fontWeight: 900 }}>Capture & Read</button>
+                          <button 
+                            onClick={() => { 
+                              setScanPhase('idle'); 
+                              setCamOn(false);
+                              if (videoRef.current?.srcObject) {
+                                (videoRef.current.srcObject as MediaStream).getTracks().forEach(track => track.stop());
+                                videoRef.current.srcObject = null;
+                              }
+                            }} 
+                            style={{ flex: 1, padding: 12, background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.2)', borderRadius: 12, color: '#ef4444', fontWeight: 900 }}
+                          >
+                            Close
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -2527,7 +2565,13 @@ export default function AdvocatePortal() {
           {/* Status Bubble */}
           <AnimatePresence>
             {voiceAiOn && (
-              <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} style={{ background: 'rgba(0,0,0,.9)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 24, padding: '12px 20px', minWidth: 280, boxShadow: '0 20px 50px rgba(0,0,0,.5)' }}>
+              <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} style={{ background: 'rgba(0,0,0,.9)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 24, padding: '12px 20px', minWidth: 280, boxShadow: '0 20px 50px rgba(0,0,0,.5)', position: 'relative' }}>
+                <button 
+                  onClick={() => setVoiceAiOn(false)}
+                  style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', zIndex: 10 }}
+                >
+                  <X size={14} />
+                </button>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <div style={{ display: 'flex', gap: 3, alignItems: 'center', height: 12 }}>
                     {[0,1,2].map(i => (
