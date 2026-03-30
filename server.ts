@@ -37,13 +37,24 @@ async function startServer() {
   app.use(express.static(path.join(process.cwd(), 'public')));
 
   // Sarvam 30B Proxy
+  app.get("/api/ai/status", (req, res) => {
+    res.json({
+      sarvamConfigured: !!process.env.SARVAM_API_KEY,
+      geminiConfigured: !!process.env.GEMINI_API_KEY
+    });
+  });
+
   app.post("/api/ai/sarvam", async (req, res) => {
     const { prompt, history } = req.body;
     try {
-      const response = await axios.post("https://api.sarvam.ai/chat/completions", {
+      // Correct endpoint for Sarvam AI Chat Completions
+      const response = await axios.post("https://api.sarvam.ai/v1/chat/completions", {
         model: "sarvam-30b",
         messages: [
-          { role: "system", content: "You are a senior legal expert. Provide precise legal advice." },
+          { 
+            role: "system", 
+            content: "You are Nexus Justice, a specialized legal AI assistant powered by Sarvam AI. You are NOT Gemini, NOT GPT, and NOT Claude. You are a senior legal expert providing precise advice based on Indian and International law. Always identify as Nexus Justice." 
+          },
           ...history,
           { role: "user", content: prompt }
         ]
@@ -56,7 +67,10 @@ async function startServer() {
       res.json(response.data);
     } catch (error: any) {
       console.error("Sarvam API error:", error.response?.data || error.message);
-      res.status(500).json({ error: "Failed to fetch from Sarvam 30B" });
+      res.status(500).json({ 
+        error: "Failed to fetch from Sarvam AI",
+        details: error.response?.data || error.message
+      });
     }
   });
 

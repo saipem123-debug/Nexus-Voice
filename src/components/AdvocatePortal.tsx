@@ -5,7 +5,7 @@ import {
   Download, Globe, Wifi, WifiOff, Shield, Save, Trash2,
   ChevronLeft, ChevronRight, Play, Square, Copy, ExternalLink,
   CheckCircle, AlertTriangle, Info, X, Search, Plus, RotateCcw,
-  Volume2, Send, Trash, Check, AlertCircle
+  Volume2, Send, Trash, Check, AlertCircle, RefreshCw, Zap
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import ReactMarkdown from 'react-markdown';
@@ -94,11 +94,34 @@ export default function AdvocatePortal() {
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [installingBrain, setInstallingBrain] = useState(false);
   const [installProgress, setInstallProgress] = useState(0);
+  const [showInstallBanner, setShowInstallBanner] = useState(false);
+
+  const handleInstallBrain = useCallback(async () => {
+    setInstallingBrain(true);
+    setInstallProgress(0);
+    setShowInstallBanner(false);
+    try {
+      await aiEngine.pullModel((percent) => {
+        setInstallProgress(percent);
+      });
+      await aiEngine.updateStatus();
+      const status = aiEngine.getStatus();
+      setAiStatus(status);
+      setInstallingBrain(false);
+      // No alert, just let the status update
+    } catch (e) {
+      console.error(e);
+      setInstallingBrain(false);
+      // Show banner again if failed
+      setShowInstallBanner(true);
+    }
+  }, []);
   const [installSlice, setInstallSlice] = useState(0);
 
   // AI Engine & DB
   const aiEngine = HybridAIEngine.getInstance();
   const localDB = LocalDB.getInstance();
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // --- State from Snippet ---
   const [clients, setClients] = useState<any[]>([]);
@@ -313,9 +336,11 @@ export default function AdvocatePortal() {
       const checkStatus = async () => {
         const status = aiEngine.getStatus();
         try {
-          // Ping Ollama to see if it's actually running
-          await axios.get('http://localhost:11434/api/tags', { timeout: 1000 });
-          status.ollamaReady = true;
+          // Ping Ollama to see if it's actually running and if model is present
+          const res = await axios.get('http://localhost:11434/api/tags', { timeout: 2000 });
+          const models = res.data.models || [];
+          const hasGemma = models.some((m: any) => m.name.includes('gemma3') && m.name.includes('1b'));
+          status.ollamaReady = hasGemma;
         } catch (e) {
           status.ollamaReady = false;
         }
@@ -323,7 +348,7 @@ export default function AdvocatePortal() {
       };
       
       checkStatus();
-      const statusInterval = setInterval(checkStatus, 5000);
+      const statusInterval = setInterval(checkStatus, 10000);
       
       if (localStorage.getItem('onboarding_complete')) setShowOnboarding(false);
       return () => clearInterval(statusInterval);
@@ -354,18 +379,35 @@ export default function AdvocatePortal() {
     if (!text || consoleLoading) return;
     if (!initialText) setConsoleInput("");
     
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    abortControllerRef.current = new AbortController();
+
     const userId = localDB.run("INSERT INTO chat_history (role, content) VALUES (?, ?)", ['user', text]);
-    setChatHistory(prev => [...prev, { id: userId || undefined, role: 'user', content: text }]);
+    const updatedHistory: AIMessage[] = [...chatHistory, { id: userId || undefined, role: 'user', content: text }];
+    setChatHistory(updatedHistory);
     setConsoleLoading(true);
 
     try {
-      const response = await aiEngine.generateResponse(text, chatHistory);
+      const response = await aiEngine.generateResponse(
+        text, 
+        chatHistory, 
+        undefined, 
+        abortControllerRef.current.signal,
+        (status) => setVoiceAiStatus(status)
+      );
       const aiId = localDB.run("INSERT INTO chat_history (role, content, engine) VALUES (?, ?, ?)", ['assistant', response.text, response.engine]);
       setChatHistory(prev => [...prev, { id: aiId || undefined, role: 'assistant', content: response.text, engine: response.engine }]);
     } catch (err) {
-      console.error(err);
+      if (err instanceof Error && err.message === "Aborted") {
+        console.log("Consult request aborted");
+      } else {
+        console.error(err);
+        const errorMsg = "Nexus AI: I'm sorry, I encountered an error while processing your request. Please try again or check your connection.";
+        setChatHistory(prev => [...prev, { role: 'assistant', content: errorMsg, engine: 'Error' }]);
+      }
     } finally {
       setConsoleLoading(false);
+      setVoiceAiStatus("");
     }
   };
 
@@ -373,16 +415,32 @@ export default function AdvocatePortal() {
     if (!deskInput.trim() || deskLoading) return;
     const text = deskInput.trim();
     setDeskInput("");
+
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    abortControllerRef.current = new AbortController();
+
     setDeskChatHistory(prev => [...prev, { role: 'user', text }]);
     setDeskLoading(true);
 
     try {
-      const response = await aiEngine.generateResponse(text, []);
+      const response = await aiEngine.generateResponse(
+        text, 
+        [], 
+        undefined, 
+        abortControllerRef.current.signal,
+        (status) => setVoiceAiStatus(status)
+      );
       setDeskChatHistory(prev => [...prev, { role: 'ai', text: response.text, engine: response.engine }]);
     } catch (err) {
-      console.error(err);
+      if (err instanceof Error && err.message === "Aborted") {
+        console.log("Desk chat request aborted");
+      } else {
+        console.error(err);
+        setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Error: Failed to get response from AI.", engine: 'Error' }]);
+      }
     } finally {
       setDeskLoading(false);
+      setVoiceAiStatus("");
     }
   };
 
@@ -447,27 +505,57 @@ export default function AdvocatePortal() {
 
   const captureScan = async () => {
     if (!videoRef.current || !canvasRef.current) return;
-    setScanPhase('processing'); setScanProgress(20);
+    setScanPhase('processing');
+    setScanProgress(10);
+    setVoiceAiStatus("Capturing Image...");
+    
     const context = canvasRef.current.getContext('2d');
     canvasRef.current.width = videoRef.current.videoWidth;
     canvasRef.current.height = videoRef.current.videoHeight;
     context?.drawImage(videoRef.current, 0, 0);
     const imageBase64 = canvasRef.current.toDataURL('image/jpeg');
     
-    setScanProgress(40);
     try {
+      setVoiceAiStatus("Scanning Text (ML Kit)...");
+      // Use the new OCR service
+      const extractedText = await aiEngine.performOCR(imageBase64, (progress) => {
+        setScanProgress(10 + Math.round(progress * 0.4)); // 10% to 50%
+      });
+
+      if (!extractedText || extractedText.trim().length < 5) {
+        throw new Error("No clear text found in the document.");
+      }
+
+      setScannedText(extractedText);
+      setScanProgress(60);
+      setVoiceAiStatus("Gemma 3 is reading...");
+
+      // Now use Gemma to "read" and analyze the extracted text
+      const prompt = `I have scanned a legal document. Here is the extracted text:
+      
+      --- START OF TEXT ---
+      ${extractedText}
+      --- END OF TEXT ---
+      
+      Please analyze this document, identify the parties involved, the main obligations, and any potential legal risks. Use a professional legal tone.`;
+
       const response = await aiEngine.generateResponse(
-        "Please extract all the text from this legal document and summarize its key points.", 
+        prompt, 
         [], 
-        imageBase64
+        undefined, // No image here, we use the extracted text
+        undefined,
+        (status) => setVoiceAiStatus(status)
       );
-      setScannedText(response.text);
+
+      setScannedText(prev => `--- EXTRACTED TEXT ---\n${prev}\n\n--- AI ANALYSIS ---\n${response.text}`);
       setScanPhase('done');
       setScanProgress(100);
-    } catch (err) {
-      setScanError('AI analysis failed.');
+    } catch (err: any) {
+      console.error("Scan failed:", err);
+      setScanError(err.message || 'AI analysis failed.');
       setScanPhase('error');
     } finally {
+      setVoiceAiStatus("");
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(t => t.stop());
         streamRef.current = null;
@@ -574,6 +662,14 @@ export default function AdvocatePortal() {
 
   const isProcessingRef = useRef(false);
 
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+    };
+  }, []);
+
+  const [voiceAiStatus, setVoiceAiStatus] = useState("");
+
   const processVoiceCommand = useCallback(async (text: string) => {
     if (!text.trim() || isProcessingRef.current) return;
     
@@ -584,14 +680,17 @@ export default function AdvocatePortal() {
       return;
     }
 
+    console.log("Processing voice command:", text);
     setIsProcessing(true);
     isProcessingRef.current = true;
     setView('consult'); // Switch to consult tab automatically
     setVoiceAiThinking(true);
+    setVoiceAiStatus("Initializing...");
     
     // Add user message to history immediately so it shows up in the UI
     const userId = localDB.run("INSERT INTO chat_history (role, content) VALUES (?, ?)", ['user', text]);
-    setChatHistory(prev => [...prev, { id: userId || undefined, role: 'user', content: text }]);
+    const updatedHistory: AIMessage[] = [...chatHistory, { id: userId || undefined, role: 'user', content: text }];
+    setChatHistory(updatedHistory);
     
     // Ensure the transcript stays visible in the dock while thinking
     setVoiceAiTranscript(text);
@@ -599,9 +698,15 @@ export default function AdvocatePortal() {
     
     setVoiceAiReply(''); 
     setActiveEngine('');
+    
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    abortControllerRef.current = new AbortController();
+
     try {
+      console.log("Calling AI Engine for voice command...");
       let imageBase64 = undefined;
       if (camOn && videoRef.current) {
+        console.log("Capturing frame for multimodal voice command...");
         const canvas = document.createElement('canvas');
         canvas.width = videoRef.current.videoWidth;
         canvas.height = videoRef.current.videoHeight;
@@ -609,22 +714,35 @@ export default function AdvocatePortal() {
         imageBase64 = canvas.toDataURL('image/jpeg');
       }
 
-      const response = await aiEngine.generateResponse(text, chatHistoryRef.current, imageBase64);
+      const response = await aiEngine.generateResponse(
+        text, 
+        chatHistory, 
+        imageBase64, 
+        abortControllerRef.current.signal,
+        (status) => setVoiceAiStatus(status)
+      );
+      console.log("AI Engine responded for voice command:", response.engine);
       
       // Now clear the transcript only when we have the reply
       setVoiceAiTranscript('');
       setVoiceAiReply(response.text);
       setActiveEngine(response.engine);
+      setVoiceAiStatus("");
       const aiId = localDB.run("INSERT INTO chat_history (role, content, engine) VALUES (?, ?, ?)", ['assistant', response.text, response.engine]);
       setChatHistory(prev => [...prev, { id: aiId || undefined, role: 'assistant', content: response.text, engine: response.engine }]);
       speakResponse(response.text);
     } catch (err) {
-      console.error(err);
-      const errorMsg = "I encountered an error processing your request.";
-      setVoiceAiTranscript('');
-      setVoiceAiReply(errorMsg);
-      setActiveEngine('Error');
-      speakResponse(errorMsg);
+      if (err instanceof Error && err.message === "Aborted") {
+        console.log("Voice command aborted");
+      } else {
+        console.error(err);
+        const errorMsg = "Nexus AI: I encountered an error processing your request.";
+        setVoiceAiTranscript('');
+        setVoiceAiReply(errorMsg);
+        setActiveEngine('Error');
+        speakResponse(errorMsg);
+        setChatHistory(prev => [...prev, { role: 'assistant', content: errorMsg, engine: 'Error' }]);
+      }
     } finally {
       setVoiceAiThinking(false);
       setIsProcessing(false);
@@ -835,6 +953,8 @@ export default function AdvocatePortal() {
   }, [voiceAiOn, stopVoiceAi, startVoiceAi]);
 
   const resetVoiceAi = useCallback(() => {
+    console.log("Resetting Voice AI...");
+    if (abortControllerRef.current) abortControllerRef.current.abort();
     stopVoiceAi();
     setVoiceAiReply('');
     setVoiceAiThinking(false);
@@ -842,6 +962,7 @@ export default function AdvocatePortal() {
     setVoiceAiTranscript('');
     voiceAiTranscriptRef.current = '';
     setIsProcessing(false);
+    isProcessingRef.current = false;
     window.speechSynthesis.cancel();
     setVoiceAiSpeaking(false);
     isSpeakingRef.current = false;
@@ -853,6 +974,30 @@ export default function AdvocatePortal() {
       toggleVoiceAi();
     }, 500);
   }, [stopVoiceAi, toggleVoiceAi]);
+
+  const refreshAiStatus = useCallback(async () => {
+    await aiEngine.updateStatus();
+    const status = aiEngine.getStatus();
+    setAiStatus(status);
+  }, []);
+
+  useEffect(() => {
+    const checkNeedInstall = async () => {
+      // If Ollama is running but Gemma 3 is missing, show the banner
+      if (!aiStatus.ollamaReady && !aiStatus.offlineBrain && navigator.onLine) {
+        // Double check if Ollama is even reachable
+        try {
+          const res = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(2000) });
+          if (res.ok) {
+            setShowInstallBanner(true);
+          }
+        } catch (e) {
+          // Ollama not running at all, don't show banner yet
+        }
+      }
+    };
+    checkNeedInstall();
+  }, [aiStatus.ollamaReady, aiStatus.offlineBrain]);
 
   // --- Sidebar & Tab Config ---
   const sideNav = [
@@ -946,11 +1091,17 @@ export default function AdvocatePortal() {
             </div>
             <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,.1)' }} />
             <div style={{ padding: '4px 12px', background: 'rgba(255,255,255,.05)', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 16 }}>
+              <button onClick={refreshAiStatus} title="Refresh AI Status" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <RefreshCw size={10} />
+              </button>
+              
+              <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,.1)' }} />
+
               {/* Gemini Status */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.geminiReady ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
                 <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.geminiReady ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                  Gemini: {aiStatus.geminiReady ? 'Active' : 'Offline'}
+                  Gemini 2.5: {aiStatus.geminiReady ? 'Active' : 'Offline'}
                 </span>
               </div>
               
@@ -968,17 +1119,40 @@ export default function AdvocatePortal() {
 
               {/* Gemma 3 Status */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: (aiStatus.ollamaReady || aiStatus.offlineBrain) ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
+                <span className="pulse-a" style={{ 
+                  width: 6, height: 6, borderRadius: '50%', 
+                  background: aiStatus.ollamaReady ? '#10b981' : aiStatus.offlineBrain ? '#f59e0b' : '#f43f5e', 
+                  display: 'inline-block' 
+                }} />
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
-                  <span style={{ fontSize: 9, fontWeight: 900, color: (aiStatus.ollamaReady || aiStatus.offlineBrain) ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                    Gemma 3: {(aiStatus.ollamaReady || aiStatus.offlineBrain) ? 'Active' : 'Not Active'}
-                  </span>
-                  {!(aiStatus.ollamaReady || aiStatus.offlineBrain) && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ 
+                      fontSize: 9, fontWeight: 900, 
+                      color: aiStatus.ollamaReady ? '#10b981' : aiStatus.offlineBrain ? '#f59e0b' : '#f43f5e', 
+                      letterSpacing: '0.1em', textTransform: 'uppercase' 
+                    }}>
+                      Gemma 3: {aiStatus.ollamaReady ? 'Active' : aiStatus.offlineBrain ? 'Offline (Installed)' : 'Not Installed'}
+                    </span>
+                    <button onClick={refreshAiStatus} title="Refresh Gemma 3 Status" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>
+                      <RotateCcw size={8} />
+                    </button>
+                  </div>
+                  {!aiStatus.ollamaReady && (
                     <button onClick={() => setView('config')} style={{ fontSize: 7, color: '#f59e0b', background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', textDecoration: 'underline', fontWeight: 900, textTransform: 'uppercase' }}>
-                      Install Brain
+                      {aiStatus.offlineBrain ? 'Check Connection' : 'Install Brain'}
                     </button>
                   )}
                 </div>
+              </div>
+
+              <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,.1)' }} />
+
+              {/* Transformers.js Status */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.transformersReady ? '#10b981' : aiStatus.transformersLoading ? '#f59e0b' : '#f43f5e', display: 'inline-block' }} />
+                <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.transformersReady ? '#10b981' : aiStatus.transformersLoading ? '#f59e0b' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  Browser AI: {aiStatus.transformersReady ? 'Ready' : aiStatus.transformersLoading ? 'Loading...' : 'Offline'}
+                </span>
               </div>
             </div>
           </div>
@@ -995,6 +1169,46 @@ export default function AdvocatePortal() {
             ))}
           </div>
         </div>
+
+        {/* INSTALL BANNER */}
+        {showInstallBanner && (
+          <div style={{ background: '#f59e0b', color: '#000', padding: '8px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <Brain size={14} />
+              <span>Nexus Justice needs to download its local brain (Gemma 3) for offline legal support.</span>
+            </div>
+            <div style={{ display: 'flex', gap: 12 }}>
+              <button onClick={handleInstallBrain} style={{ background: '#000', color: '#f59e0b', border: 'none', padding: '4px 12px', borderRadius: 6, fontSize: 10, fontWeight: 900, cursor: 'pointer' }}>
+                Download & Install Now
+              </button>
+              <button onClick={() => setShowInstallBanner(false)} style={{ background: 'none', border: 'none', color: '#000', cursor: 'pointer', opacity: 0.6 }}>
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* INSTALL PROGRESS OVERLAY */}
+        {installingBrain && (
+          <div style={{ position: 'fixed', bottom: 24, right: 24, width: 300, background: '#0a0f1d', border: '1px solid #f59e0b', borderRadius: 16, padding: 20, zIndex: 1000, boxShadow: '0 10px 40px rgba(0,0,0,0.5)', animation: 'fadeUp 0.3s ease' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+              <div className="spin" style={{ color: '#f59e0b' }}>
+                <RotateCcw size={20} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12, fontWeight: 900, color: '#f59e0b' }}>Downloading Brain...</div>
+                <div style={{ fontSize: 10, color: '#64748b' }}>Gemma 3-1B-it (Ollama)</div>
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 900 }}>{installProgress}%</div>
+            </div>
+            <div style={{ height: 6, background: 'rgba(255,255,255,.05)', borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ height: '100%', background: '#f59e0b', width: `${installProgress}%`, transition: 'width 0.1s' }} />
+            </div>
+            <p style={{ fontSize: 9, color: '#475569', marginTop: 12, margin: 0, lineHeight: 1.4 }}>
+              This will take a few minutes. You can continue using the app while the brain downloads.
+            </p>
+          </div>
+        )}
 
         {/* Content */}
         <main style={{ flex: 1, overflow: 'hidden', position: 'relative', background: '#020617' }}>
@@ -1233,12 +1447,55 @@ export default function AdvocatePortal() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: 20 }}>
                   <div style={S.card}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+                      <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6366f1' }}>
+                        <Zap size={20} />
+                      </div>
+                      <div>
+                        <h3 style={{ fontSize: 16, fontWeight: 900 }}>Browser-side AI</h3>
+                        <p style={{ fontSize: 11, color: '#475569' }}>Transformers.js (Zero-install)</p>
+                      </div>
+                    </div>
+                    
+                    <div style={{ background: 'rgba(255,255,255,.02)', borderRadius: 16, padding: 20, border: '1px solid rgba(255,255,255,.05)' }}>
+                      <div style={{ marginBottom: 16 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Status: {aiStatus.transformersReady ? 'Ready' : aiStatus.transformersLoading ? 'Initializing...' : 'Not Initialized'}</div>
+                        <p style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5 }}>
+                          Transformers.js runs AI directly in your browser using WebGPU or WASM. 
+                          No local server required. The model is downloaded once and cached.
+                        </p>
+                      </div>
+                      
+                      {aiStatus.transformersLoading ? (
+                        <div style={{ textAlign: 'center', padding: 10 }}>
+                          <div className="animate-spin w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full mx-auto mb-2" />
+                          <div style={{ fontSize: 10, color: '#6366f1', fontWeight: 900 }}>INITIALIZING ENGINE...</div>
+                        </div>
+                      ) : aiStatus.transformersReady ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#10b981', fontSize: 12, fontWeight: 700 }}>
+                          <CheckCircle size={16} /> Browser AI is active.
+                        </div>
+                      ) : (
+                        <button 
+                          onClick={async () => {
+                            await aiEngine.initTransformers();
+                            setAiStatus(aiEngine.getStatus());
+                          }}
+                          style={{ width: '100%', padding: '14px', background: '#6366f1', border: 'none', borderRadius: 12, color: '#fff', fontWeight: 900, fontSize: 13, cursor: 'pointer' }}
+                        >
+                          Activate Browser AI
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={S.card}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
                       <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(245,158,11,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f59e0b' }}>
                         <Download size={20} />
                       </div>
                       <div>
                         <h3 style={{ fontSize: 16, fontWeight: 900 }}>Offline Brain Facility</h3>
-                        <p style={{ fontSize: 11, color: '#475569' }}>Local legal AI installation</p>
+                        <p style={{ fontSize: 11, color: '#475569' }}>Local legal AI installation (Ollama)</p>
                       </div>
                     </div>
                     
@@ -1261,28 +1518,26 @@ export default function AdvocatePortal() {
                             <div style={{ height: '100%', background: '#f59e0b', width: `${installProgress}%`, transition: 'width 0.1s' }} />
                           </div>
                         </div>
-                      ) : aiStatus.offlineBrain ? (
+                      ) : aiStatus.ollamaReady ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#10b981', fontSize: 12, fontWeight: 700 }}>
-                          <CheckCircle size={16} /> Gemma 3 is ready for offline use.
+                          <CheckCircle size={16} /> Gemma 3 is active and ready for offline use.
+                        </div>
+                      ) : aiStatus.offlineBrain ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#f59e0b', fontSize: 12, fontWeight: 700 }}>
+                            <div className="animate-pulse w-2 h-2 rounded-full bg-amber-500" /> 
+                            Gemma 3 is installed but the server is unreachable.
+                          </div>
+                          <button 
+                            onClick={refreshAiStatus}
+                            style={{ width: '100%', padding: '12px', background: 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.2)', borderRadius: 12, color: '#f59e0b', fontWeight: 900, fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                          >
+                            <RotateCcw size={14} /> Retry Connection
+                          </button>
                         </div>
                       ) : (
                         <button 
-                          onClick={async () => {
-                            setInstallingBrain(true);
-                            setInstallProgress(0);
-                            try {
-                              await aiEngine.pullModel((percent) => {
-                                setInstallProgress(percent);
-                              });
-                              setAiStatus(aiEngine.getStatus());
-                              setInstallingBrain(false);
-                              alert("Offline Brain (Gemma 3) installed successfully via Ollama.");
-                            } catch (e) {
-                              console.error(e);
-                              setInstallingBrain(false);
-                              alert("Failed to install brain. Please ensure Ollama is running.");
-                            }
-                          }}
+                          onClick={handleInstallBrain}
                           style={{ width: '100%', padding: '14px', background: '#f59e0b', border: 'none', borderRadius: 12, color: '#000', fontWeight: 900, fontSize: 13, cursor: 'pointer' }}
                         >
                           Install Gemma 3 Now
@@ -1294,6 +1549,11 @@ export default function AdvocatePortal() {
                         The Offline Brain (Gemma 3) allows you to process legal queries without an internet connection. 
                         It is a compact yet powerful model optimized for legal reasoning.
                       </p>
+                      {!aiStatus.ollamaReady && (
+                        <p style={{ fontSize: 9, color: '#64748b', marginTop: 12, borderTop: '1px solid rgba(255,255,255,.05)', paddingTop: 8 }}>
+                          <strong>Troubleshooting:</strong> If the brain won't install, ensure Ollama is running and set the environment variable <code>OLLAMA_ORIGINS="*"</code> on your computer.
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -1402,11 +1662,28 @@ export default function AdvocatePortal() {
                         </div>
                       </div>
                     )}
-                    {(consoleLoading || voiceAiThinking) && <div className="flex gap-2 p-4"><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" /><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-100" /><div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-200" /></div>}
+                    {(consoleLoading || voiceAiThinking) && (
+                      <div className="flex items-center gap-3 p-4">
+                        <div className="flex gap-2">
+                          <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" />
+                          <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-100" />
+                          <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-200" />
+                        </div>
+                        <span style={{ fontSize: 10, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase' }}>
+                          {voiceAiStatus || 'Thinking...'}
+                        </span>
+                      </div>
+                    )}
                   </div>
                   <div style={{ display: 'flex', gap: 10 }}>
                     <input value={consoleInput} onChange={e => setConsoleInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendConsult()} placeholder="Ask anything legal..." style={{ flex: 1, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 14, padding: '13px 18px' }} />
-                    <button onClick={() => sendConsult()} style={{ padding: '13px 22px', background: '#6366f1', border: 'none', borderRadius: 14, color: '#fff', fontWeight: 900 }}>Send</button>
+                    {consoleLoading ? (
+                      <button onClick={() => { if(abortControllerRef.current) abortControllerRef.current.abort(); setConsoleLoading(false); }} style={{ padding: '13px 22px', background: '#ef4444', border: 'none', borderRadius: 14, color: '#fff', fontWeight: 900, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Square size={14} fill="currentColor" /> Stop
+                      </button>
+                    ) : (
+                      <button onClick={() => sendConsult()} style={{ padding: '13px 22px', background: '#6366f1', border: 'none', borderRadius: 14, color: '#fff', fontWeight: 900 }}>Send</button>
+                    )}
                   </div>
                 </div>
               </motion.div>
@@ -1520,7 +1797,29 @@ export default function AdvocatePortal() {
                   </div>
                   <div style={{ flex: 1, ...S.card, display: 'flex', flexDirection: 'column' }}>
                     <div style={{ fontSize: 9, color: '#10b981', fontWeight: 900, textTransform: 'uppercase', marginBottom: 12 }}>Extracted Text</div>
-                    <div style={{ flex: 1, overflowY: 'auto', fontSize: 13, color: '#94a3b8', lineHeight: 1.8, fontFamily: 'monospace' }}>{scannedText || "Capture a document to see text..."}</div>
+                    <div style={{ flex: 1, overflowY: 'auto', fontSize: 13, color: '#94a3b8', lineHeight: 1.8, fontFamily: 'monospace' }}>
+                      {scanPhase === 'processing' ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                          <div style={{ width: '100%', maxWidth: 200, height: 4, background: 'rgba(255,255,255,.05)', borderRadius: 2, overflow: 'hidden' }}>
+                            <motion.div 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${scanProgress}%` }}
+                              style={{ height: '100%', background: '#10b981' }} 
+                            />
+                          </div>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            {[0,1,2].map(i => <motion.div key={i} animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: i*0.2 }} style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981' }} />)}
+                          </div>
+                          <span style={{ fontSize: 10, color: '#10b981', fontWeight: 900, textTransform: 'uppercase', letterSpacing: 1 }}>
+                            {voiceAiStatus || 'Scanning Document...'}
+                          </span>
+                        </div>
+                      ) : (
+                        <div style={{ whiteSpace: 'pre-wrap' }}>
+                          {scannedText || "Capture a document to see text..."}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </motion.div>
@@ -1582,6 +1881,18 @@ export default function AdvocatePortal() {
                     ))}
                   </div>
                   <div style={{ padding: 16, borderTop: '1px solid rgba(255,255,255,.05)' }}>
+                    {deskLoading && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                        <div style={{ display: 'flex', gap: 2 }}>
+                          <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce" />
+                          <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce delay-100" />
+                          <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce delay-200" />
+                        </div>
+                        <span style={{ fontSize: 9, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase' }}>
+                          {voiceAiStatus || 'Thinking...'}
+                        </span>
+                      </div>
+                    )}
                     <input value={deskInput} onChange={e => setDeskInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendDeskChat()} placeholder="Ask AI to draft..." style={{ width: '100%', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 10, padding: 10, fontSize: 12 }} />
                   </div>
                 </div>
@@ -1613,7 +1924,7 @@ export default function AdvocatePortal() {
                     ))}
                   </div>
                   <span style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                    {voiceAiListening ? 'Listening...' : voiceAiThinking ? 'Thinking...' : voiceAiSpeaking ? 'Speaking...' : 'Nexus AI Ready'}
+                    {voiceAiListening ? 'Listening...' : voiceAiThinking ? (voiceAiStatus || 'Thinking...') : voiceAiSpeaking ? 'Speaking...' : 'Nexus AI Ready'}
                   </span>
                   
                   {voiceAiListening && (
@@ -1709,14 +2020,20 @@ export default function AdvocatePortal() {
                     </button>
                   </div>
                 )}
-                {voiceAiThinking && !voiceAiReply && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      {[0,1,2].map(i => <motion.div key={i} animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: i*0.2 }} style={{ width: 6, height: 6, borderRadius: '50%', background: '#6366f1' }} />)}
+                  {voiceAiThinking && !voiceAiReply && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        {[0,1,2].map(i => <motion.div key={i} animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: i*0.2 }} style={{ width: 6, height: 6, borderRadius: '50%', background: '#6366f1' }} />)}
+                      </div>
+                      <span style={{ fontSize: 10, color: '#6366f1', fontWeight: 600 }}>{voiceAiStatus || 'Nexus is thinking...'}</span>
+                      <button 
+                        onClick={() => { if(abortControllerRef.current) abortControllerRef.current.abort(); setVoiceAiThinking(false); setIsProcessing(false); isProcessingRef.current = false; }}
+                        style={{ fontSize: 8, padding: '2px 6px', borderRadius: 4, background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', cursor: 'pointer', fontWeight: 900, marginLeft: 'auto' }}
+                      >
+                        STOP
+                      </button>
                     </div>
-                    <span style={{ fontSize: 10, color: '#6366f1', fontWeight: 600 }}>Nexus is thinking...</span>
-                  </div>
-                )}
+                  )}
                 <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
                     Engine: {activeEngine || (isOffline || aiStatus.offlineBrain ? 'Gemma 3' : aiStatus.builtIn ? 'Gemini Nano' : 'Gemini 3 Flash')}

@@ -3,6 +3,7 @@ import initSqlJs, { Database } from 'sql.js';
 export class LocalDB {
   private static instance: LocalDB;
   private db: Database | null = null;
+  private initializing: Promise<void> | null = null;
 
   private constructor() {}
 
@@ -15,9 +16,11 @@ export class LocalDB {
 
   public async init() {
     if (this.db) return;
+    if (this.initializing) return this.initializing;
 
-    const cdns = [
-      'https://sql.js.org/dist/sql-wasm.wasm',
+    this.initializing = (async () => {
+      const cdns = [
+        'https://sql.js.org/dist/sql-wasm.wasm',
       'https://unpkg.com/sql.js@1.12.0/dist/sql-wasm.wasm',
       'https://cdn.jsdelivr.net/npm/sql.js@1.12.0/dist/sql-wasm.wasm',
       'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.wasm'
@@ -61,13 +64,16 @@ export class LocalDB {
         this.db = new SQL.Database(u8);
       } else {
         this.db = new SQL.Database();
-        this.createTables();
       }
+      this.createTables();
     } catch (err: any) {
       console.error("Nexus: Failed to initialize sql.js with binary:", err);
+      this.initializing = null; // Allow retry
       throw err;
     }
-  }
+  })();
+  return this.initializing;
+}
 
   private createTables() {
     if (!this.db) return;
@@ -107,28 +113,34 @@ export class LocalDB {
 
   public run(sql: string, params?: any[]) {
     if (!this.db) return null;
-    this.db.run(sql, params);
-    this.save();
     try {
+      this.db.run(sql, params);
+      this.save();
       const res = this.db.exec("SELECT last_insert_rowid()");
       return res[0].values[0][0] as number;
     } catch (e) {
+      console.error("Nexus: SQL Run Error:", e, sql);
       return null;
     }
   }
 
   public query(sql: string, params?: any[]) {
     if (!this.db) return [];
-    const res = this.db.exec(sql, params);
-    if (res.length === 0) return [];
-    
-    const columns = res[0].columns;
-    return res[0].values.map(row => {
-      const obj: any = {};
-      columns.forEach((col, i) => {
-        obj[col] = row[i];
+    try {
+      const res = this.db.exec(sql, params);
+      if (res.length === 0) return [];
+      
+      const columns = res[0].columns;
+      return res[0].values.map(row => {
+        const obj: any = {};
+        columns.forEach((col, i) => {
+          obj[col] = row[i];
+        });
+        return obj;
       });
-      return obj;
-    });
+    } catch (e) {
+      console.error("Nexus: SQL Query Error:", e, sql);
+      return [];
+    }
   }
 }
