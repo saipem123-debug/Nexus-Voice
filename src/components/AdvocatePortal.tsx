@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import ReactMarkdown from 'react-markdown';
+import confetti from 'canvas-confetti';
 import { jsPDF } from "jspdf";
 import { Document, Packer, Paragraph, TextRun } from "docx";
 import { saveAs } from "file-saver";
@@ -96,7 +97,36 @@ export default function AdvocatePortal() {
   const [aiStatus, setAiStatus] = useState<any>({});
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [showOnboarding, setShowOnboarding] = useState(true);
+  const [onboardingStep, setOnboardingStep] = useState(1);
+  const [userApiKey, setUserApiKey] = useState("");
+  const [isKeyValidating, setIsKeyValidating] = useState(false);
   const [installingBrain, setInstallingBrain] = useState(false);
+
+  // Auto-grab API Key from clipboard
+  useEffect(() => {
+    if (onboardingStep !== 3) return;
+
+    const handleFocus = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && text.startsWith("AIzaSy") && text.length > 30) {
+          setUserApiKey(text);
+          setNotifications(prev => [{
+            id: Date.now(),
+            message: "API Key detected and grabbed from clipboard!",
+            date: new Date().toISOString().split('T')[0],
+            read: false,
+            type: 'success'
+          }, ...prev]);
+        }
+      } catch (err) {
+        // Clipboard access might be denied, ignore
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, [onboardingStep]);
   const [installProgress, setInstallProgress] = useState(0);
   const [showInstallBanner, setShowInstallBanner] = useState(false);
 
@@ -130,7 +160,7 @@ export default function AdvocatePortal() {
   // --- State from Snippet ---
   const [clients, setClients] = useState<any[]>([]);
   const [addingClient, setAddingClient] = useState(false);
-  const [newClient, setNewClient] = useState<any>({});
+  const [newClient, setNewClient] = useState({ name: '', phone: '', case_number: '', court: '', next_date: '', purpose: '' });
   const [chatHistory, setChatHistory] = useState<AIMessage[]>([]);
   const [consoleInput, setConsoleInput] = useState("");
   const [consoleLoading, setConsoleLoading] = useState(false);
@@ -300,6 +330,8 @@ export default function AdvocatePortal() {
     { id: 1, category: 'railway', name: 'Railways Act, 1989.pdf', size: '2.4 MB', date: '2026-01-12', pages: 184 },
     { id: 2, category: 'property', name: 'Transfer of Property Act, 1882.pdf', size: '960 KB', date: '2025-10-05', pages: 78 },
   ]);
+  const [savedDrafts, setSavedDrafts] = useState<any[]>([]);
+  const [scannedDocs, setScannedDocs] = useState<any[]>([]);
   const [kbFilter, setKbFilter] = useState('all');
   const [kbSearch, setKbSearch] = useState('');
 
@@ -343,6 +375,16 @@ export default function AdvocatePortal() {
         const savedHistory = localDB.query("SELECT * FROM chat_history ORDER BY id ASC") as any[];
         if (savedHistory.length > 0) {
           setChatHistory(savedHistory.map(h => ({ id: h.id, role: h.role, content: h.content, engine: h.engine })));
+        }
+
+        const savedDraftsFromDb = localDB.query("SELECT * FROM drafts ORDER BY timestamp DESC") as any[];
+        if (savedDraftsFromDb.length > 0) {
+          setSavedDrafts(savedDraftsFromDb);
+        }
+
+        const savedScansFromDb = localDB.query("SELECT * FROM scanned_docs ORDER BY timestamp DESC") as any[];
+        if (savedScansFromDb.length > 0) {
+          setScannedDocs(savedScansFromDb);
         }
       } catch (err) {
         console.error("Database initialization failed:", err);
@@ -429,6 +471,18 @@ export default function AdvocatePortal() {
     } finally {
       setConsoleLoading(false);
       setVoiceAiStatus("");
+    }
+  };
+
+  const handleAddClient = () => {
+    if (!newClient.name || !newClient.phone) return;
+    const id = localDB.run("INSERT INTO clients (name, phone, case_number, court, next_date, purpose) VALUES (?, ?, ?, ?, ?, ?)", 
+      [newClient.name, newClient.phone, newClient.case_number, newClient.court, newClient.next_date, newClient.purpose]);
+    if (id) {
+      setClients(prev => [...prev, { ...newClient, id }]);
+      setAddingClient(false);
+      setNewClient({ name: '', phone: '', case_number: '', court: '', next_date: '', purpose: '' });
+      setNotifications(prev => [{ id: Date.now(), message: `Client ${newClient.name} added to registry.`, date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
     }
   };
 
@@ -677,11 +731,11 @@ export default function AdvocatePortal() {
       const visionResponse = await aiEngine.sarvamVision(visionPrompt, imageBase64);
       
       if (visionResponse) {
-        setScannedText(prev => {
-          const baseText = prev ? `--- EXTRACTED TEXT ---\n${prev}\n\n` : "";
-          return `${baseText}--- SARVAM VISION ANALYSIS ---\n${visionResponse}`;
-        });
+        const baseText = extractedText ? `--- EXTRACTED TEXT ---\n${extractedText}\n\n` : "";
+        const finalContent = `${baseText}--- SARVAM VISION ANALYSIS ---\n${visionResponse}`;
+        setScannedText(finalContent);
         speakResponse(visionResponse);
+        saveScanToDb(finalContent, imageBase64);
       } else if (extractedText && extractedText.trim().length >= 5) {
         // Fallback to Gemma 3 if Sarvam Vision fails but we have OCR text
         setVoiceAiStatus("Gemma 3 is reading...");
@@ -872,6 +926,26 @@ export default function AdvocatePortal() {
     } finally {
       setDeskLoading(false);
       setVoiceAiStatus("");
+    }
+  };
+
+  const saveDraftToDb = () => {
+    if (!draftPages[0].trim()) return;
+    const title = draftPages[0].split('\n')[0].replace(/[#*]/g, '').trim().slice(0, 50) || "Untitled Draft";
+    const id = localDB.run("INSERT INTO drafts (title, content, case_facts) VALUES (?, ?, ?)", [title, draftPages[0], caseFacts]);
+    if (id) {
+      setSavedDrafts(prev => [{ id, title, content: draftPages[0], case_facts: caseFacts, timestamp: new Date().toISOString() }, ...prev]);
+      setNotifications(prev => [{ id: Date.now(), message: `Draft "${title}" saved to Knowledge Base.`, date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+    }
+  };
+
+  const saveScanToDb = (content: string, imageBase64?: string) => {
+    if (!content.trim()) return;
+    const title = "Scanned Document " + new Date().toLocaleString();
+    const id = localDB.run("INSERT INTO scanned_docs (title, content, image_base64) VALUES (?, ?, ?)", [title, content, imageBase64 || ""]);
+    if (id) {
+      setScannedDocs(prev => [{ id, title, content, image_base64: imageBase64 || "", timestamp: new Date().toISOString() }, ...prev]);
+      setNotifications(prev => [{ id: Date.now(), message: `Scan saved to Knowledge Base.`, date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
     }
   };
 
@@ -2070,21 +2144,178 @@ export default function AdvocatePortal() {
                     </tbody>
                   </table>
                 </div>
+
+                {/* Add Client Modal */}
+                <AnimatePresence>
+                  {addingClient && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.8)', backdropFilter: 'blur(10px)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+                      <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} style={{ background: '#0a0f1d', border: '1px solid rgba(255,255,255,.1)', borderRadius: 24, padding: 32, width: '100%', maxWidth: 500, boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+                          <h3 style={{ fontSize: 20, fontWeight: 900, color: '#fff' }}>New Client Entry</h3>
+                          <button onClick={() => setAddingClient(false)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}><X size={20} /></button>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Full Name</label>
+                              <input value={newClient.name} onChange={e => setNewClient({...newClient, name: e.target.value})} placeholder="e.g. Rahul Sharma" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Phone Number</label>
+                              <input value={newClient.phone} onChange={e => setNewClient({...newClient, phone: e.target.value})} placeholder="+91 00000 00000" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
+                            </div>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Case Number</label>
+                              <input value={newClient.case_number} onChange={e => setNewClient({...newClient, case_number: e.target.value})} placeholder="e.g. OS 123/2026" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Court Name</label>
+                              <input value={newClient.court} onChange={e => setNewClient({...newClient, court: e.target.value})} placeholder="e.g. District Court" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
+                            </div>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Next Hearing Date</label>
+                              <input type="date" value={newClient.next_date} onChange={e => setNewClient({...newClient, next_date: e.target.value})} style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Purpose</label>
+                              <input value={newClient.purpose} onChange={e => setNewClient({...newClient, purpose: e.target.value})} placeholder="e.g. Evidence" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
+                            </div>
+                          </div>
+                          <button onClick={handleAddClient} style={{ marginTop: 12, padding: 16, background: '#6366f1', border: 'none', borderRadius: 14, color: '#fff', fontWeight: 900, fontSize: 14, cursor: 'pointer', boxShadow: '0 10px 20px -5px rgba(99,102,241,0.4)' }}>Register Client</button>
+                        </div>
+                      </motion.div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </motion.div>
             )}
 
             {/* KNOWLEDGE BASE */}
             {view === 'knowledge-base' && (
               <motion.div key="kb" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', overflowY: 'auto', padding: 28 }}>
-                <h2 style={{ fontSize: 36, fontWeight: 900, fontStyle: 'italic', margin: '0 0 24px' }}>Law Knowledge Base</h2>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))', gap: 14 }}>
-                  {kbDocs.map(doc => (
-                    <div key={doc.id} style={{ background: '#0a0f1d', borderRadius: 18, padding: 20, border: '1px solid rgba(255,255,255,.05)' }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{doc.name}</div>
-                      <div style={{ fontSize: 10, color: '#475569' }}>{doc.size} · {doc.pages} pages</div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+                  <h2 style={{ fontSize: 36, fontWeight: 900, fontStyle: 'italic', margin: 0 }}>Law Knowledge Base</h2>
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    <div style={{ display: 'flex', background: 'rgba(255,255,255,.05)', borderRadius: 10, padding: 4 }}>
+                      <button onClick={() => setKbFilter('all')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'all' ? '#6366f1' : 'transparent', color: kbFilter === 'all' ? '#fff' : '#64748b' }}>ALL</button>
+                      <button onClick={() => setKbFilter('acts')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'acts' ? '#6366f1' : 'transparent', color: kbFilter === 'acts' ? '#fff' : '#64748b' }}>ACTS</button>
+                      <button onClick={() => setKbFilter('drafts')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'drafts' ? '#6366f1' : 'transparent', color: kbFilter === 'drafts' ? '#fff' : '#64748b' }}>MY DRAFTS</button>
+                      <button onClick={() => setKbFilter('scans')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'scans' ? '#6366f1' : 'transparent', color: kbFilter === 'scans' ? '#fff' : '#64748b' }}>SCANS</button>
                     </div>
-                  ))}
+                  </div>
                 </div>
+
+                {kbFilter !== 'drafts' && kbFilter !== 'scans' && (
+                  <>
+                    <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 16 }}>Legal Acts & References</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))', gap: 14, marginBottom: 40 }}>
+                      {kbDocs.filter(d => kbFilter === 'all' || kbFilter === 'acts' || d.category === kbFilter).map(doc => (
+                        <div key={doc.id} style={{ background: '#0a0f1d', borderRadius: 18, padding: 20, border: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', gap: 16 }}>
+                          <div style={{ width: 40, height: 40, borderRadius: 10, background: 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6366f1' }}>
+                            <FileText size={20} />
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: '#fff' }}>{doc.name}</div>
+                            <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>{doc.size} · {doc.pages} pages</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {(kbFilter === 'all' || kbFilter === 'drafts') && (
+                  <>
+                    <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 16 }}>Saved Drafts & Petitions</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(320px,1fr))', gap: 14, marginBottom: 40 }}>
+                      {savedDrafts.length === 0 ? (
+                        <div style={{ gridColumn: '1/-1', padding: 40, textAlign: 'center', background: 'rgba(255,255,255,.02)', borderRadius: 20, border: '1px dashed rgba(255,255,255,.05)' }}>
+                          <FileText size={32} style={{ color: '#1e293b', margin: '0 auto 12px' }} />
+                          <div style={{ fontSize: 13, color: '#475569' }}>No drafts saved yet. Use the Writing Desk to create one.</div>
+                        </div>
+                      ) : (
+                        savedDrafts.map(draft => (
+                          <div key={draft.id} style={{ background: '#0a0f1d', borderRadius: 18, padding: 20, border: '1px solid rgba(255,255,255,.05)', position: 'relative' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                              <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(16,185,129,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10b981' }}>
+                                <Zap size={16} />
+                              </div>
+                              <div style={{ fontSize: 9, color: '#475569', fontWeight: 700 }}>{new Date(draft.timestamp).toLocaleDateString()}</div>
+                            </div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 6 }}>{draft.title}</div>
+                            <div style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5, height: 50, overflow: 'hidden', textOverflow: 'ellipsis' }}>{draft.content.slice(0, 150)}...</div>
+                            <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+                              <button 
+                                onClick={() => {
+                                  setDraftPages([draft.content]);
+                                  setCaseFacts(draft.case_facts || "");
+                                  setView('writing-desk');
+                                }}
+                                style={{ flex: 1, padding: '8px', background: 'rgba(99,102,241,.1)', border: 'none', borderRadius: 8, color: '#6366f1', fontSize: 10, fontWeight: 900, cursor: 'pointer' }}
+                              >
+                                Open in Desk
+                              </button>
+                              <button 
+                                onClick={() => downloadAsPDF(draft.content, draft.title)}
+                                style={{ padding: '8px', background: 'rgba(255,255,255,.05)', border: 'none', borderRadius: 8, color: '#cbd5e1', cursor: 'pointer' }}
+                              >
+                                <Download size={14} />
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {(kbFilter === 'all' || kbFilter === 'scans') && (
+                  <>
+                    <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 16 }}>Scanned Documents & Analysis</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(320px,1fr))', gap: 14 }}>
+                      {scannedDocs.length === 0 ? (
+                        <div style={{ gridColumn: '1/-1', padding: 40, textAlign: 'center', background: 'rgba(255,255,255,.02)', borderRadius: 20, border: '1px dashed rgba(255,255,255,.05)' }}>
+                          <Camera size={32} style={{ color: '#1e293b', margin: '0 auto 12px' }} />
+                          <div style={{ fontSize: 13, color: '#475569' }}>No scans saved yet. Use the Reading Room to scan one.</div>
+                        </div>
+                      ) : (
+                        scannedDocs.map(scan => (
+                          <div key={scan.id} style={{ background: '#0a0f1d', borderRadius: 18, padding: 20, border: '1px solid rgba(255,255,255,.05)', position: 'relative' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                              <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(16,185,129,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10b981' }}>
+                                <Camera size={16} />
+                              </div>
+                              <div style={{ fontSize: 9, color: '#475569', fontWeight: 700 }}>{new Date(scan.timestamp).toLocaleDateString()}</div>
+                            </div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 6 }}>{scan.title}</div>
+                            <div style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5, height: 50, overflow: 'hidden', textOverflow: 'ellipsis' }}>{scan.content.slice(0, 150)}...</div>
+                            <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+                              <button 
+                                onClick={() => {
+                                  setScannedText(scan.content);
+                                  setView('reading-room');
+                                }}
+                                style={{ flex: 1, padding: '8px', background: 'rgba(16,185,129,.1)', border: 'none', borderRadius: 8, color: '#10b981', fontSize: 10, fontWeight: 900, cursor: 'pointer' }}
+                              >
+                                View in Room
+                              </button>
+                              <button 
+                                onClick={() => downloadAsPDF(scan.content, scan.title)}
+                                style={{ padding: '8px', background: 'rgba(255,255,255,.05)', border: 'none', borderRadius: 8, color: '#cbd5e1', cursor: 'pointer' }}
+                              >
+                                <Download size={14} />
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                )}
               </motion.div>
             )}
 
@@ -2440,6 +2671,9 @@ export default function AdvocatePortal() {
                       <button onClick={handleDownloadDraft} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, color: '#cbd5e1', fontSize: 10, fontWeight: 900 }}>
                         <Download size={12} /> Download
                       </button>
+                      <button onClick={saveDraftToDb} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 8, color: '#10b981', fontSize: 10, fontWeight: 900 }}>
+                        <Save size={12} /> Save to DB
+                      </button>
                       <button onClick={() => setDraftEditMode(!draftEditMode)} style={{ padding: '6px 12px', background: draftEditMode ? '#f59e0b' : 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.2)', borderRadius: 8, color: draftEditMode ? '#000' : '#f59e0b', fontSize: 10, fontWeight: 900 }}>
                         {draftEditMode ? 'Save' : 'Edit'}
                       </button>
@@ -2738,19 +2972,185 @@ export default function AdvocatePortal() {
 
       {/* --- ONBOARDING MODAL --- */}
       {showOnboarding && (
-        <div className="absolute inset-0 z-[200] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6">
-          <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full">
-            <div className="w-20 h-20 bg-amber-500 rounded-3xl flex items-center justify-center mb-8"><span className="text-4xl font-black italic text-black">N</span></div>
-            <h2 className="text-4xl font-black italic tracking-tighter mb-4">Welcome to <span className="text-indigo-500">Nexus Hybrid</span></h2>
-            <p className="text-slate-400 mb-8 leading-relaxed">Please ensure your <strong className="text-white">Chrome Browser is updated</strong> for the best AI experience.</p>
-            <div className="space-y-4 mb-10">
-              <div className="flex items-center gap-4 p-4 bg-white/5 rounded-2xl border border-white/5">
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${aiStatus.builtIn ? 'bg-emerald-500/10 text-emerald-500' : 'bg-amber-500/10 text-amber-500'}`}>{aiStatus.builtIn ? <CheckCircle size={20} /> : <AlertTriangle size={20} />}</div>
-                <div className="flex-1"><div className="text-sm font-bold">{aiStatus.builtIn ? 'Built-in AI Detected' : 'Chrome Update Recommended'}</div><div className="text-xs text-slate-500">{aiStatus.builtIn ? 'Zero-download AI is ready.' : 'Update Chrome to enable zero-download AI.'}</div></div>
-              </div>
-            </div>
-            <button onClick={() => { localStorage.setItem('onboarding_complete', 'true'); setShowOnboarding(false); }} className="w-full py-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-black uppercase tracking-widest">Enter Portal</button>
-          </motion.div>
+        <div className="absolute inset-0 z-[200] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6 overflow-hidden">
+          <AnimatePresence mode="wait">
+            {onboardingStep === 1 && (
+              <motion.div 
+                key="step1"
+                initial={{ scale: 0.9, opacity: 0, y: 20 }} 
+                animate={{ scale: 1, opacity: 1, y: 0 }} 
+                exit={{ scale: 1.1, opacity: 0, y: -20 }}
+                className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full text-center"
+              >
+                <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center mb-8 mx-auto shadow-2xl shadow-indigo-500/20">
+                  <Shield size={40} className="text-white" />
+                </div>
+                <h2 className="text-4xl font-black italic tracking-tighter mb-4">Nexus <span className="text-indigo-500">Justice</span></h2>
+                <p className="text-slate-400 mb-8 leading-relaxed">The ultimate hybrid AI workspace for advocates. Secure, offline-first, and powerful.</p>
+                
+                <button 
+                  onClick={() => {
+                    setOnboardingStep(2);
+                    confetti({
+                      particleCount: 150,
+                      spread: 70,
+                      origin: { y: 0.6 },
+                      colors: ['#6366f1', '#a855f7', '#ec4899']
+                    });
+                  }} 
+                  className="w-full py-5 bg-white text-black hover:bg-slate-200 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 transition-all active:scale-95"
+                >
+                  <Icon path="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" size={20} />
+                  Login with Google
+                </button>
+              </motion.div>
+            )}
+
+            {onboardingStep === 2 && (
+              <motion.div 
+                key="step2"
+                initial={{ scale: 0.9, opacity: 0, y: 20 }} 
+                animate={{ scale: 1, opacity: 1, y: 0 }} 
+                exit={{ scale: 1.1, opacity: 0, y: -20 }}
+                className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full text-center"
+              >
+                <div className="w-20 h-20 bg-emerald-500 rounded-3xl flex items-center justify-center mb-8 mx-auto shadow-2xl shadow-emerald-500/20">
+                  <Zap size={40} className="text-white" />
+                </div>
+                <h2 className="text-4xl font-black italic tracking-tighter mb-4">Login <span className="text-emerald-500">Successful!</span></h2>
+                <p className="text-slate-400 mb-8 leading-relaxed">Now, let's supercharge your experience. Connect your Gemini API key to enable unlimited cloud-scale legal research.</p>
+                
+                <div className="p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl mb-8 text-left">
+                  <div className="flex items-center gap-3 text-indigo-400 font-bold mb-2">
+                    <Info size={16} />
+                    <span className="text-sm uppercase tracking-wider">Why BYOK?</span>
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed">By using your own key, you get higher rate limits and direct access to the latest Gemini models without any platform restrictions.</p>
+                </div>
+
+                <button 
+                  onClick={() => setOnboardingStep(3)} 
+                  className="w-full py-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-black uppercase tracking-widest transition-all active:scale-95"
+                >
+                  Connect to Google AI Studio
+                </button>
+              </motion.div>
+            )}
+
+            {onboardingStep === 3 && (
+              <motion.div 
+                key="step3"
+                initial={{ scale: 0.9, opacity: 0, y: 20 }} 
+                animate={{ scale: 1, opacity: 1, y: 0 }} 
+                exit={{ scale: 1.1, opacity: 0, y: -20 }}
+                className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full"
+              >
+                <div className="flex items-center justify-between mb-8">
+                  <h2 className="text-2xl font-black italic tracking-tighter">Generate <span className="text-indigo-500">API Key</span></h2>
+                  <div className="px-3 py-1 bg-white/5 rounded-full text-[10px] font-bold text-slate-500 uppercase tracking-widest border border-white/5">Step 3 of 4</div>
+                </div>
+
+                <div className="space-y-6 mb-8">
+                  <div className="flex gap-4">
+                    <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center text-indigo-400 font-black shrink-0">1</div>
+                    <p className="text-sm text-slate-400">Click the button below to open Google AI Studio's API key page.</p>
+                  </div>
+                  <div className="flex gap-4">
+                    <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center text-indigo-400 font-black shrink-0">2</div>
+                    <p className="text-sm text-slate-400">Click <strong className="text-white">"Create API key in new project"</strong> and copy the key.</p>
+                  </div>
+                  <div className="flex gap-4">
+                    <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center text-indigo-400 font-black shrink-0">3</div>
+                    <p className="text-sm text-slate-400">Return here. We'll attempt to <strong className="text-white">grab it automatically</strong> from your clipboard.</p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <a 
+                    href="https://aistudio.google.com/app/apikey" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-2xl font-bold flex items-center justify-center gap-3 transition-all"
+                  >
+                    <ExternalLink size={18} />
+                    Open Google AI Studio
+                  </a>
+
+                  <div className="relative">
+                    <input 
+                      type="password" 
+                      placeholder="Paste API Key here (or we'll grab it)..."
+                      value={userApiKey}
+                      onChange={(e) => setUserApiKey(e.target.value)}
+                      className="w-full py-4 px-6 bg-black/40 border border-white/10 rounded-2xl text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 transition-all font-mono text-sm"
+                    />
+                    {userApiKey.startsWith("AIzaSy") && (
+                      <div className="absolute right-4 top-1/2 -translate-y-1/2 text-emerald-500">
+                        <CheckCircle size={20} />
+                      </div>
+                    )}
+                  </div>
+
+                  <button 
+                    disabled={!userApiKey.startsWith("AIzaSy") || isKeyValidating}
+                    onClick={async () => {
+                      setIsKeyValidating(true);
+                      try {
+                        // Save to DB and Engine
+                        aiEngine.setApiKey(userApiKey);
+                        setOnboardingStep(4);
+                        confetti({
+                          particleCount: 200,
+                          spread: 100,
+                          origin: { y: 0.5 },
+                          colors: ['#10b981', '#34d399', '#6ee7b7']
+                        });
+                      } catch (e) {
+                        console.error(e);
+                      } finally {
+                        setIsKeyValidating(false);
+                      }
+                    }} 
+                    className={`w-full py-5 rounded-2xl font-black uppercase tracking-widest transition-all ${userApiKey.startsWith("AIzaSy") ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-xl shadow-indigo-500/20' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}
+                  >
+                    {isKeyValidating ? 'Validating...' : 'Securely Save Key'}
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {onboardingStep === 4 && (
+              <motion.div 
+                key="step4"
+                initial={{ scale: 0.9, opacity: 0, y: 20 }} 
+                animate={{ scale: 1, opacity: 1, y: 0 }} 
+                exit={{ scale: 1.1, opacity: 0, y: -20 }}
+                className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full text-center"
+              >
+                <div className="w-24 h-24 bg-indigo-600 rounded-full flex items-center justify-center mb-8 mx-auto shadow-2xl shadow-indigo-500/40 relative">
+                  <Check size={60} className="text-white" />
+                  <motion.div 
+                    animate={{ scale: [1, 1.5, 1], opacity: [0.5, 0, 0.5] }} 
+                    transition={{ repeat: Infinity, duration: 2 }}
+                    className="absolute inset-0 bg-indigo-500 rounded-full"
+                  />
+                </div>
+                <h2 className="text-4xl font-black italic tracking-tighter mb-4">Now <span className="text-indigo-500">Ready!</span></h2>
+                <p className="text-slate-400 mb-10 leading-relaxed">Your Gemini API key is securely stored in your local encrypted database. You're ready to use the full power of Nexus Justice.</p>
+                
+                <button 
+                  onClick={() => { 
+                    localStorage.setItem('onboarding_complete', 'true'); 
+                    setShowOnboarding(false); 
+                    setView('command');
+                  }} 
+                  className="w-full py-5 bg-white text-black hover:bg-slate-200 rounded-2xl font-black uppercase tracking-widest transition-all active:scale-95"
+                >
+                  Go to Command Page
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       )}
     </div>
