@@ -37,8 +37,8 @@ async function startServer() {
 
   // --- OAuth 2.0 Client Setup ---
   const oauth2Client = new OAuth2Client(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
+    process.env.GOOGLE_CLIENT_ID || 'dummy-id',
+    process.env.GOOGLE_CLIENT_SECRET || 'dummy-secret'
   );
 
   // --- API Routes ---
@@ -65,6 +65,7 @@ async function startServer() {
   // Google OAuth URL for Gemini BYOK
   app.get("/api/auth/url", (req, res) => {
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+      console.error("GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing in environment variables.");
       return res.status(500).json({ error: "Google OAuth credentials not configured in environment variables." });
     }
 
@@ -79,10 +80,9 @@ async function startServer() {
       prompt: 'consent',
       redirect_uri: redirectUri,
       scope: [
-        'https://www.googleapis.com/auth/userinfo.email',
-        'https://www.googleapis.com/auth/userinfo.profile',
-        'https://www.googleapis.com/auth/generative-language',
-        'https://www.googleapis.com/auth/drive.file'
+        'openid',
+        'email',
+        'profile'
       ]
     });
     res.json({ url });
@@ -96,6 +96,8 @@ async function startServer() {
       const host = req.get('host');
       const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
       const redirectUri = `${baseUrl}/auth/callback`;
+      console.log('OAuth Callback - Redirect URI:', redirectUri);
+      console.log('OAuth Callback - Code received:', !!code);
 
       const { tokens } = await oauth2Client.getToken({
         code: code as string,
@@ -130,10 +132,42 @@ async function startServer() {
 
       res.send(`
         <html>
+          <head>
+            <title>Authentication Successful</title>
+            <style>
+              body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #020617; color: white; text-align: center; }
+              .spinner { border: 4px solid rgba(255,255,255,0.1); border-left-color: #6366f1; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
+              @keyframes spin { to { transform: rotate(360deg); } }
+              h1 { font-size: 1.5rem; margin-bottom: 10px; }
+              p { color: #94a3b8; }
+            </style>
+          </head>
           <body>
+            <div class="spinner"></div>
+            <h1>Authentication Successful</h1>
+            <p>Closing this window and returning to Nexus Justice...</p>
+            <button id="closeBtn" style="display: none; margin-top: 20px; padding: 10px 20px; background: #6366f1; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">Close Window</button>
             <script>
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', userId: '${userId}' }, '*');
-              window.close();
+              console.log('Callback script running...');
+              try {
+                if (window.opener) {
+                  console.log('Opener found, sending message...');
+                  window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', userId: '${userId}' }, '*');
+                  setTimeout(() => {
+                    console.log('Closing window...');
+                    window.close();
+                    // Fallback if window.close() is blocked
+                    document.getElementById('closeBtn').style.display = 'block';
+                    document.getElementById('closeBtn').onclick = () => window.close();
+                  }, 1500);
+                } else {
+                  console.error('Opener not found');
+                  document.body.innerHTML = '<h1>Error</h1><p>Opener window not found. Please close this window and try again.</p><button onclick="window.close()" style="margin-top: 20px; padding: 10px 20px; background: #6366f1; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">Close Window</button>';
+                }
+              } catch (e) {
+                console.error('PostMessage error:', e);
+                document.body.innerHTML = '<h1>Error</h1><p>Failed to communicate with main window. ' + e.message + '</p><button onclick="window.close()" style="margin-top: 20px; padding: 10px 20px; background: #6366f1; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">Close Window</button>';
+              }
             </script>
           </body>
         </html>

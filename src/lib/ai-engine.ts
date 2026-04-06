@@ -30,10 +30,13 @@ export class HybridAIEngine {
       const response = await axios.get('/api/ai/token');
       this.accessToken = response.data.accessToken;
       if (this.accessToken) {
-        // Initialize with access token in headers
+        // Initialize with access token in custom headers
         this.genAI = new GoogleGenAI({ 
-          apiKey: 'dummy-key', // The SDK requires an apiKey string, but we'll override it with the header
-        });
+          apiKey: 'dummy-key', // Still need a placeholder for the SDK to not complain
+          customHeaders: {
+            'Authorization': `Bearer ${this.accessToken}`
+          }
+        } as any);
         this.geminiReady = true;
       }
     } catch (err) {
@@ -197,8 +200,7 @@ export class HybridAIEngine {
           tools: [{ googleSearch: {} }]
         },
         // @ts-ignore
-        contents: contents,
-        ...this.getRequestOptions()
+        contents: contents
       });
       
       console.log("Gemini Orchestrator responded.");

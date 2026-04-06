@@ -102,11 +102,11 @@ export default function AdvocatePortal() {
   const [showTutorial, setShowTutorial] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [hasEntered, setHasEntered] = useState(false);
   const [cloudSync, setCloudSync] = useState(false);
   const [userApiKey, setUserApiKey] = useState("");
   const [isKeyValidating, setIsKeyValidating] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -122,6 +122,10 @@ export default function AdvocatePortal() {
             photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
           });
           setOnboardingStep(4); // Skip to ready
+          setShowOnboarding(true);
+        } else {
+          setShowOnboarding(true);
+          setOnboardingStep(1);
         }
         setIsAuthReady(true);
       } catch (err) {
@@ -165,9 +169,11 @@ export default function AdvocatePortal() {
       };
 
       window.addEventListener('message', handleMessage);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Login failed:", error);
-      speak("Connection failed. Please try again.");
+      const errorMsg = error.response?.data?.error || error.message || "Unknown error";
+      setLoginError(errorMsg);
+      speak(`Connection failed: ${errorMsg}. Please try again.`);
     }
   };
 
@@ -1798,19 +1804,6 @@ export default function AdvocatePortal() {
 
   return (
     <div style={S.page}>
-      {/* Temporary Admin Entry Overlay */}
-      {!hasEntered && (
-        <div className="fixed inset-0 z-[9999] bg-[#020617] flex flex-col items-center justify-center gap-5 p-6 text-center">
-          <p className="text-[10px] md:text-xs font-black text-slate-500 tracking-[0.2em] uppercase">Nexus Justice Admin Bypass</p>
-          <button 
-            onClick={() => setHasEntered(true)}
-            className="w-20 h-20 md:w-24 md:h-24 rounded-full bg-[#ffdbac] flex items-center justify-center cursor-pointer shadow-[0_0_50px_rgba(255,219,172,0.2)] transition-transform active:scale-95"
-          >
-            <ChevronRight size={48} className="md:w-[60px] md:h-[60px] text-[#020617] stroke-[3]" />
-          </button>
-          <p className="text-[10px] text-slate-400">Click to enter Command Center</p>
-        </div>
-      )}
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
@@ -3258,6 +3251,14 @@ export default function AdvocatePortal() {
                 <p className="text-slate-500 mb-10 text-sm uppercase tracking-widest font-bold">Advocate Portal Login</p>
                 
                 <div className="space-y-4 mb-10">
+                  {loginError && (
+                    <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex items-center gap-3 text-left mb-4">
+                      <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
+                      <div className="text-[10px] text-red-400 font-bold uppercase tracking-widest leading-tight">
+                        {loginError}
+                      </div>
+                    </div>
+                  )}
                   <button 
                     onClick={handleGoogleLogin} 
                     className="w-full py-5 bg-white text-black hover:bg-slate-200 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 transition-all active:scale-95 shadow-lg"
