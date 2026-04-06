@@ -1,12 +1,7 @@
 import axios from 'axios';
-import { GoogleGenAI } from "@google/genai";
-import { pipeline, env } from '@huggingface/transformers';
+import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import Tesseract from 'tesseract.js';
 import { LocalDB } from './local-db';
-
-// Configure Transformers.js to use local cache if possible
-env.allowLocalModels = false;
-env.useBrowserCache = true;
 
 export type AIMessage = {
   id?: number;
@@ -18,16 +13,36 @@ export type AIMessage = {
 export class HybridAIEngine {
   private static instance: HybridAIEngine;
   private genAI: GoogleGenAI | null = null;
-
-  private sarvamReady: boolean = false;
+  private accessToken: string | null = null;
   private geminiReady: boolean = false;
 
   private constructor() {
     this.updateStatus();
-    this.loadApiKey();
+    this.init();
   }
 
-  private loadApiKey() {
+  private async init() {
+    await this.refreshAccessToken();
+  }
+
+  private async refreshAccessToken() {
+    try {
+      const response = await axios.get('/api/ai/token');
+      this.accessToken = response.data.accessToken;
+      if (this.accessToken) {
+        // Initialize with access token in headers
+        this.genAI = new GoogleGenAI({ 
+          apiKey: 'dummy-key', // The SDK requires an apiKey string, but we'll override it with the header
+        });
+        this.geminiReady = true;
+      }
+    } catch (err) {
+      console.warn("Failed to fetch access token from backend. Falling back to static key if available.");
+      this.loadStaticApiKey();
+    }
+  }
+
+  private loadStaticApiKey() {
     const localDB = LocalDB.getInstance();
     const config = localDB.query("SELECT value FROM config WHERE key = 'gemini_api_key'");
     let apiKey = config.length > 0 ? config[0].value : null;
@@ -47,6 +62,41 @@ export class HybridAIEngine {
     localDB.run("INSERT OR REPLACE INTO config (key, value) VALUES ('gemini_api_key', ?)", [apiKey]);
     this.genAI = new GoogleGenAI({ apiKey });
     this.geminiReady = true;
+  }
+
+  private getRequestOptions() {
+    if (this.accessToken) {
+      return {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`
+        }
+      };
+    }
+    return {};
+  }
+
+  public async connectLive(callbacks: {
+    onopen?: () => void;
+    onmessage: (message: LiveServerMessage) => void;
+    onerror?: (error: any) => void;
+    onclose?: () => void;
+  }) {
+    if (!this.genAI) throw new Error("GenAI not initialized");
+    
+    // Refresh token before connecting if using OAuth
+    if (this.accessToken) await this.refreshAccessToken();
+
+    return this.genAI.live.connect({
+      model: "gemini-3.1-flash-live-preview",
+      callbacks,
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
+        },
+        systemInstruction: "You are the primary AI Orchestrator (Gemini 3.1 Flash-Live) for Nexus Justice. You handle all voice interactions and vision-based legal assistance in real-time. You are professional, authoritative, and helpful. You can see through the advocate's camera and hear their voice. Your goal is to provide a seamless, real-time experience for the advocate.",
+      },
+    });
   }
 
   private lastStatusUpdate: number = 0;
@@ -80,7 +130,6 @@ export class HybridAIEngine {
     this.lastStatusUpdate = now;
     try {
       const response = await axios.get('/api/ai/status', { timeout: 5000 });
-      this.sarvamReady = response.data.sarvamConfigured;
       this.geminiReady = response.data.geminiConfigured || !!this.genAI;
     } catch (e) {
       console.warn("Failed to fetch AI status from backend");
@@ -94,90 +143,16 @@ export class HybridAIEngine {
     return HybridAIEngine.instance;
   }
 
-  private isSarvamTask(prompt: string): boolean {
-    const sarvamKeywords = [
-      'search', 'web', 'internet', 'legal doubt', 'research', 'translate', 
-      'malayalam', 'hindi', 'tamil', 'telugu', 'kannada', 'marathi', 'bengali',
-      'draft', 'writing', 'petition', 'plaint', 'affidavit', 'contract', 'agreement',
-      'legal advice', 'legal opinion'
-    ];
-    const lowerPrompt = prompt.toLowerCase();
-    return sarvamKeywords.some(keyword => lowerPrompt.includes(keyword));
-  }
-
-  private async callSarvam(prompt: string, history: AIMessage[], signal?: AbortSignal): Promise<string | null> {
-    try {
-      if (signal?.aborted) return null;
-      console.log("Calling Sarvam AI for specialized task...");
-      const response = await axios.post('/api/ai/sarvam', {
-        prompt,
-        history: history.map(m => ({ role: m.role, content: m.content }))
-      }, { signal, timeout: 45000 });
-      console.log("Sarvam AI responded.");
-      return response.data.choices[0].message.content;
-    } catch (err) {
-      if (axios.isCancel(err)) {
-        console.log("Sarvam AI request cancelled.");
-        return null;
-      }
-      console.error("Sarvam AI failed:", err);
-      return null;
-    }
-  }
-
-  public async sarvamTTS(text: string): Promise<string | null> {
-    try {
-      console.log("Calling Sarvam TTS (Bulbul V3)...");
-      const response = await axios.post('/api/ai/sarvam/tts', { text });
-      return response.data.audios?.[0] || null;
-    } catch (err) {
-      console.error("Sarvam TTS failed:", err);
-      return null;
-    }
-  }
-
-  public async sarvamSTT(audioBase64: string): Promise<string | null> {
-    try {
-      console.log("Calling Sarvam STT (Saaras V3)...");
-      const response = await axios.post('/api/ai/sarvam/stt', { audio_content: audioBase64 });
-      return response.data.transcript || null;
-    } catch (err) {
-      console.error("Sarvam STT failed:", err);
-      return null;
-    }
-  }
-
-  public async sarvamVision(prompt: string, imageBase64: string): Promise<string | null> {
-    try {
-      console.log("Calling Sarvam Vision...");
-      const response = await axios.post('/api/ai/sarvam/vision', { prompt, imageBase64 });
-      return response.data.text || null;
-    } catch (err) {
-      console.error("Sarvam Vision failed:", err);
-      return null;
-    }
-  }
-
-  public async sarvamTranslate(input: string, targetLang: string, sourceLang: string = "en-IN"): Promise<string | null> {
-    try {
-      console.log(`Calling Sarvam Translation (${sourceLang} -> ${targetLang})...`);
-      const response = await axios.post('/api/ai/sarvam/translate', {
-        input,
-        target_language_code: targetLang,
-        source_language_code: sourceLang
-      });
-      return response.data.translated_text || null;
-    } catch (err) {
-      console.error("Sarvam Translation failed:", err);
-      return null;
-    }
-  }
-
   private async callGemini(prompt: string, history: AIMessage[], imageBase64?: string, signal?: AbortSignal): Promise<string | null> {
+    // Refresh token before calling if using OAuth
+    if (this.accessToken) {
+      await this.refreshAccessToken();
+    }
+    
     if (!this.genAI) return null;
     try {
       if (signal?.aborted) return null;
-      console.log("Calling Gemini 2.5 Flash-Live Orchestrator...");
+      console.log("Calling Gemini 2.5 Flash-Live Orchestrator with Web Search...");
       
       const sanitizedHistory: any[] = [];
       let lastRole = '';
@@ -216,12 +191,14 @@ export class HybridAIEngine {
 
       // @ts-ignore
       const response = await this.genAI.models.generateContent({
-        model: "gemini-2.5-flash-preview",
+        model: "gemini-3-flash-preview",
         config: {
-          systemInstruction: "You are the primary AI Orchestrator (Gemini 2.5 Flash-Live) for Nexus Justice. You handle all voice interactions, phone calls to clients, and direct communication with the advocate. You are professional, authoritative, and helpful. For tasks involving web search, deep legal research, complex drafting, or translation, you delegate to Sarvam AI. Your goal is to provide a seamless, high-performance experience for the advocate.",
+          systemInstruction: "You are the primary AI Orchestrator (Gemini 3 Flash) for Nexus Justice. You handle all voice interactions, phone calls to clients, and direct communication with the advocate. You are professional, authoritative, and helpful. You have access to Google Search for real-time information and legal research. Your goal is to provide a seamless, high-performance experience for the advocate.",
+          tools: [{ googleSearch: {} }]
         },
         // @ts-ignore
-        contents: contents
+        contents: contents,
+        ...this.getRequestOptions()
       });
       
       console.log("Gemini Orchestrator responded.");
@@ -239,7 +216,7 @@ export class HybridAIEngine {
   public async generateResponse(
     prompt: string, 
     history: AIMessage[], 
-    forcedEngine?: 'sarvam' | 'gemini',
+    forcedEngine?: 'gemini',
     imageBase64?: string, 
     signal?: AbortSignal,
     onStatusUpdate?: (status: string) => void
@@ -254,23 +231,13 @@ export class HybridAIEngine {
       onStatusUpdate?.("Orchestrating task...");
       await this.updateStatus();
 
-      const useSarvam = this.isSarvamTask(prompt) || forcedEngine === 'sarvam';
       const canUseOnline = navigator.onLine;
       
       if (!canUseOnline) {
         return { text: "Nexus Justice: You are currently offline. Please reconnect to use the AI Orchestrator.", engine: 'None' };
       }
 
-      // 1. Delegate to Sarvam if it's a Sarvam task (Drafting, Translation, Web Search, Legal Doubts)
-      if (useSarvam && this.sarvamReady) {
-        onStatusUpdate?.("Delegating to Sarvam AI...");
-        const sarvamResponse = await this.callSarvam(prompt, history, signal);
-        if (sarvamResponse) {
-          return { text: sarvamResponse, engine: 'Sarvam AI' };
-        }
-      }
-
-      // 2. Otherwise, use Gemini 2.5 Flash-Live Orchestrator
+      // Use Gemini 2.5 Flash-Live Orchestrator
       if (this.geminiReady) {
         onStatusUpdate?.("Consulting Gemini 2.5 Flash-Live...");
         const geminiResponse = await this.callGemini(prompt, history, imageBase64, signal);
@@ -292,7 +259,6 @@ export class HybridAIEngine {
     this.updateStatus(); 
     return {
       online: navigator.onLine,
-      sarvamReady: this.sarvamReady,
       geminiReady: this.geminiReady
     };
   }

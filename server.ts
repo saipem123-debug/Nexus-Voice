@@ -6,7 +6,9 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import axios from "axios";
 import { google } from "googleapis";
+import { OAuth2Client } from "google-auth-library";
 import cookieSession from "cookie-session";
+import db from "./src/lib/server-db.js";
 
 dotenv.config();
 
@@ -17,7 +19,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // MongoDB Connection
+  // MongoDB Connection (Optional, keeping for compatibility if needed)
   if (process.env.MONGODB_URI) {
     mongoose.connect(process.env.MONGODB_URI)
       .then(() => console.log("Connected to MongoDB"))
@@ -28,171 +30,155 @@ async function startServer() {
   app.use(cookieSession({
     name: 'session',
     keys: [process.env.SESSION_SECRET || 'nexus-secret'],
-    maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    secure: true,
-    sameSite: 'none'
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax'
   }));
+
+  // --- OAuth 2.0 Client Setup ---
+  const oauth2Client = new OAuth2Client(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
 
   // --- API Routes ---
   app.use(express.static(path.join(process.cwd(), 'public')));
 
-  // Sarvam 30B Proxy
-  app.get("/api/ai/status", (req, res) => {
+  // AI Status
+  app.get("/api/ai/status", (req: any, res) => {
+    const userId = req.session.userId;
+    let geminiConfigured = !!process.env.GEMINI_API_KEY;
+    
+    if (userId) {
+      const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+      if (user && user.refresh_token) {
+        geminiConfigured = true;
+      }
+    }
+
     res.json({
-      sarvamConfigured: !!process.env.SARVAM_API_KEY,
-      geminiConfigured: !!process.env.GEMINI_API_KEY
+      geminiConfigured,
+      isLoggedIn: !!userId
     });
   });
 
-  app.post("/api/ai/sarvam", async (req, res) => {
-    const { prompt, history } = req.body;
-    try {
-      // Correct endpoint for Sarvam AI Chat Completions
-      const response = await axios.post("https://api.sarvam.ai/v1/chat/completions", {
-        model: "sarvam-30b",
-        messages: [
-          { 
-            role: "system", 
-            content: "You are Nexus Justice, a specialized legal AI assistant powered by Sarvam AI. You are NOT Gemini, NOT GPT, and NOT Claude. You are a senior legal expert providing precise advice based on Indian and International law. Always identify as Nexus Justice." 
-          },
-          ...history,
-          { role: "user", content: prompt }
-        ]
-      }, {
-        headers: {
-          "api-subscription-key": process.env.SARVAM_API_KEY,
-          "Content-Type": "application/json"
-        }
-      });
-      res.json(response.data);
-    } catch (error: any) {
-      console.error("Sarvam API error:", error.response?.data || error.message);
-      res.status(500).json({ 
-        error: "Failed to fetch from Sarvam AI",
-        details: error.response?.data || error.message
-      });
-    }
-  });
-
-  // Sarvam TTS (Bulbul V3)
-  app.post("/api/ai/sarvam/tts", async (req, res) => {
-    const { text } = req.body;
-    try {
-      const response = await axios.post("https://api.sarvam.ai/v1/text-to-speech", {
-        inputs: [text],
-        target_language_code: "en-IN",
-        speaker: "meera", // Default speaker
-        model: "bulbul:v3"
-      }, {
-        headers: {
-          "api-subscription-key": process.env.SARVAM_API_KEY,
-          "Content-Type": "application/json"
-        }
-      });
-      res.json(response.data);
-    } catch (error: any) {
-      console.error("Sarvam TTS error:", error.response?.data || error.message);
-      res.status(500).json({ error: "Sarvam TTS failed" });
-    }
-  });
-
-  // Sarvam STT (Saaras V3)
-  app.post("/api/ai/sarvam/stt", async (req, res) => {
-    const { audio_content } = req.body; // base64
-    try {
-      const response = await axios.post("https://api.sarvam.ai/v1/speech-to-text", {
-        model: "saaras:v3",
-        language_code: "en-IN",
-        audio_content
-      }, {
-        headers: {
-          "api-subscription-key": process.env.SARVAM_API_KEY,
-          "Content-Type": "application/json"
-        }
-      });
-      res.json(response.data);
-    } catch (error: any) {
-      console.error("Sarvam STT error:", error.response?.data || error.message);
-      res.status(500).json({ error: "Sarvam STT failed" });
-    }
-  });
-
-  // Sarvam Vision
-  app.post("/api/ai/sarvam/vision", async (req, res) => {
-    const { prompt, imageBase64 } = req.body;
-    try {
-      const response = await axios.post("https://api.sarvam.ai/v1/vision", {
-        model: "sarvam-vision",
-        prompt,
-        image: imageBase64
-      }, {
-        headers: {
-          "api-subscription-key": process.env.SARVAM_API_KEY,
-          "Content-Type": "application/json"
-        }
-      });
-      res.json(response.data);
-    } catch (error: any) {
-      console.error("Sarvam Vision error:", error.response?.data || error.message);
-      res.status(500).json({ error: "Sarvam Vision failed" });
-    }
-  });
-
-  // Sarvam Translation
-  app.post("/api/ai/sarvam/translate", async (req, res) => {
-    const { input, target_language_code, source_language_code } = req.body;
-    try {
-      const response = await axios.post("https://api.sarvam.ai/v1/translate", {
-        input,
-        target_language_code,
-        source_language_code,
-        model: "mayura:v1"
-      }, {
-        headers: {
-          "api-subscription-key": process.env.SARVAM_API_KEY,
-          "Content-Type": "application/json"
-        }
-      });
-      res.json(response.data);
-    } catch (error: any) {
-      console.error("Sarvam Translation error:", error.response?.data || error.message);
-      res.status(500).json({ error: "Sarvam Translation failed" });
-    }
-  });
-
-  // Google OAuth for Drive
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    `${process.env.APP_URL}/auth/callback`
-  );
-
+  // Google OAuth URL for Gemini BYOK
   app.get("/api/auth/url", (req, res) => {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+      return res.status(500).json({ error: "Google OAuth credentials not configured in environment variables." });
+    }
+
+    // Use APP_URL if provided, otherwise derive from request
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
+    const redirectUri = `${baseUrl}/auth/callback`;
+
     const url = oauth2Client.generateAuthUrl({
       access_type: 'offline',
-      scope: ['https://www.googleapis.com/auth/drive.file']
+      prompt: 'consent',
+      redirect_uri: redirectUri,
+      scope: [
+        'https://www.googleapis.com/auth/userinfo.email',
+        'https://www.googleapis.com/auth/userinfo.profile',
+        'https://www.googleapis.com/auth/generative-language',
+        'https://www.googleapis.com/auth/drive.file'
+      ]
     });
     res.json({ url });
   });
 
+  // OAuth Callback Handler
   app.get("/auth/callback", async (req: any, res) => {
     const { code } = req.query;
     try {
-      const { tokens } = await oauth2Client.getToken(code as string);
-      req.session.tokens = tokens;
+      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+      const host = req.get('host');
+      const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
+      const redirectUri = `${baseUrl}/auth/callback`;
+
+      const { tokens } = await oauth2Client.getToken({
+        code: code as string,
+        redirect_uri: redirectUri
+      });
+      oauth2Client.setCredentials(tokens);
+
+      // Get user info to identify them
+      const ticket = await oauth2Client.verifyIdToken({
+        idToken: tokens.id_token!,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      const payload = ticket.getPayload();
+      const userId = payload?.sub;
+      const email = payload?.email;
+
+      if (userId) {
+        // Store in SQLite
+        const stmt = db.prepare(`
+          INSERT INTO users (id, email, refresh_token, access_token, expiry_date)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            email = excluded.email,
+            refresh_token = COALESCE(excluded.refresh_token, users.refresh_token),
+            access_token = excluded.access_token,
+            expiry_date = excluded.expiry_date
+        `);
+        stmt.run(userId, email, tokens.refresh_token || null, tokens.access_token, tokens.expiry_date);
+
+        req.session.userId = userId;
+      }
+
       res.send(`
         <html>
           <body>
             <script>
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
+              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', userId: '${userId}' }, '*');
               window.close();
             </script>
           </body>
         </html>
       `);
     } catch (error) {
+      console.error("OAuth callback error:", error);
       res.status(500).send("Authentication failed");
     }
+  });
+
+  // Proxy route to get Access Token for Gemini
+  app.get("/api/ai/token", async (req: any, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Check if token is expired (with 5 min buffer)
+    if (user.expiry_date && Date.now() < user.expiry_date - 300000) {
+      return res.json({ accessToken: user.access_token });
+    }
+
+    // Refresh token
+    if (!user.refresh_token) return res.status(400).json({ error: "No refresh token available" });
+
+    try {
+      oauth2Client.setCredentials({ refresh_token: user.refresh_token });
+      const { credentials } = await oauth2Client.refreshAccessToken();
+      
+      const stmt = db.prepare(`
+        UPDATE users SET access_token = ?, expiry_date = ? WHERE id = ?
+      `);
+      stmt.run(credentials.access_token, credentials.expiry_date, userId);
+
+      res.json({ accessToken: credentials.access_token });
+    } catch (error) {
+      console.error("Token refresh error:", error);
+      res.status(500).json({ error: "Failed to refresh token" });
+    }
+  });
+
+  app.post("/api/auth/logout", (req: any, res) => {
+    req.session = null;
+    res.json({ success: true });
   });
 
   // --- Vite Middleware ---

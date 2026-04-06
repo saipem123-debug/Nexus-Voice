@@ -16,6 +16,7 @@ import { Document, Packer, Paragraph, TextRun } from "docx";
 import { saveAs } from "file-saver";
 import { HybridAIEngine, AIMessage } from "../lib/ai-engine";
 import { LocalDB } from "../lib/local-db";
+import { GoogleDriveService } from "../lib/google-drive-service";
 import axios from "axios";
 
 // --- Custom Icon Component from Snippet ---
@@ -96,61 +97,348 @@ export default function AdvocatePortal() {
   const [view, setView] = useState("command");
   const [aiStatus, setAiStatus] = useState<any>({});
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
-  const [showOnboarding, setShowOnboarding] = useState(true);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(1);
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [user, setUser] = useState<any>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [hasEntered, setHasEntered] = useState(false);
+  const [cloudSync, setCloudSync] = useState(false);
   const [userApiKey, setUserApiKey] = useState("");
   const [isKeyValidating, setIsKeyValidating] = useState(false);
-  const [installingBrain, setInstallingBrain] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
 
-  // Auto-grab API Key from clipboard
   useEffect(() => {
-    if (onboardingStep !== 3) return;
-
-    const handleFocus = async () => {
+    const checkAuth = async () => {
       try {
-        const text = await navigator.clipboard.readText();
-        if (text && text.startsWith("AIzaSy") && text.length > 30) {
-          setUserApiKey(text);
-          setNotifications(prev => [{
-            id: Date.now(),
-            message: "API Key detected and grabbed from clipboard!",
-            date: new Date().toISOString().split('T')[0],
-            read: false,
-            type: 'success'
-          }, ...prev]);
+        const response = await axios.get('/api/ai/status');
+        setIsLoggedIn(response.data.isLoggedIn);
+        setAiStatus(response.data);
+        if (response.data.isLoggedIn) {
+          // In a real app, we'd fetch user profile here
+          setUser({
+            displayName: 'Advocate',
+            email: 'user@nexus.justice',
+            photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
+          });
+          setOnboardingStep(4); // Skip to ready
         }
+        setIsAuthReady(true);
       } catch (err) {
-        // Clipboard access might be denied, ignore
+        console.error("Auth check failed:", err);
+        setIsAuthReady(true);
       }
     };
-
-    window.addEventListener('focus', handleFocus);
-    return () => window.removeEventListener('focus', handleFocus);
-  }, [onboardingStep]);
-  const [installProgress, setInstallProgress] = useState(0);
-  const [showInstallBanner, setShowInstallBanner] = useState(false);
-
-  const handleInstallBrain = useCallback(async () => {
-    setInstallingBrain(true);
-    setInstallProgress(0);
-    setShowInstallBanner(false);
-    try {
-      await aiEngine.pullModel((percent) => {
-        setInstallProgress(percent);
-      });
-      await aiEngine.updateStatus();
-      const status = aiEngine.getStatus();
-      setAiStatus(status);
-      setInstallingBrain(false);
-      // No alert, just let the status update
-    } catch (e) {
-      console.error(e);
-      setInstallingBrain(false);
-      // Show banner again if failed
-      setShowInstallBanner(true);
-    }
+    checkAuth();
   }, []);
-  const [installSlice, setInstallSlice] = useState(0);
+
+  const handleGoogleLogin = async () => {
+    try {
+      const response = await axios.get('/api/auth/url');
+      const authUrl = response.data.url;
+      
+      const width = 500;
+      const height = 600;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      
+      const popup = window.open(
+        authUrl,
+        'google-auth',
+        `width=${width},height=${height},left=${left},top=${top}`
+      );
+
+      const handleMessage = async (event: MessageEvent) => {
+        if (event.data.type === 'OAUTH_AUTH_SUCCESS') {
+          window.removeEventListener('message', handleMessage);
+          setIsLoggedIn(true);
+          setUser({
+            displayName: 'Advocate',
+            email: 'user@nexus.justice',
+            photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
+          });
+          speak("Google account connected successfully. Welcome to Nexus Justice.");
+          setOnboardingStep(4);
+          // Refresh AI engine
+          await aiEngine.updateStatus(true);
+        }
+      };
+
+      window.addEventListener('message', handleMessage);
+    } catch (error) {
+      console.error("Login failed:", error);
+      speak("Connection failed. Please try again.");
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await axios.post('/api/auth/logout');
+      setUser(null);
+      setIsLoggedIn(false);
+      setCloudSync(false);
+      setView('command');
+      window.location.reload();
+    } catch (error) {
+      console.error("Logout failed:", error);
+    }
+  };
+
+  const syncToCloud = async () => {
+    if (!isLoggedIn || !cloudSync) return;
+    
+    const driveService = GoogleDriveService.getInstance();
+    
+    try {
+      // Get Access Token from backend for Drive
+      const tokenRes = await axios.get('/api/ai/token');
+      driveService.setAccessToken(tokenRes.data.accessToken);
+
+      // Get SQLite binary
+      const savedData = localStorage.getItem('nexus_sqlite_db');
+      if (!savedData) return;
+      
+      const u8 = new Uint8Array(JSON.parse(savedData));
+      await driveService.uploadFile(u8);
+
+      speak("Legal database backed up to your Google Drive.");
+    } catch (error) {
+      console.error("Cloud sync failed:", error);
+      speak("Google Drive sync failed. Please check your connection.");
+    }
+  };
+
+  const restoreFromCloud = async () => {
+    if (!isLoggedIn) {
+      speak("Please connect your Google account first.");
+      return;
+    }
+    
+    const driveService = GoogleDriveService.getInstance();
+    try {
+      const tokenRes = await axios.get('/api/ai/token');
+      driveService.setAccessToken(tokenRes.data.accessToken);
+
+      const binary = await driveService.downloadFile();
+      if (binary) {
+        localStorage.setItem('nexus_sqlite_db', JSON.stringify(Array.from(binary)));
+        speak("Legal database restored from Google Drive. Please refresh to apply changes.");
+        setTimeout(() => window.location.reload(), 2000);
+      } else {
+        speak("No backup found in your Google Drive.");
+      }
+    } catch (error) {
+      console.error("Restore failed:", error);
+      speak("Failed to restore from Google Drive.");
+    }
+  };
+
+  useEffect(() => {
+    if (cloudSync && user) {
+      syncToCloud();
+    }
+  }, [cloudSync, user]);
+
+  const speak = (text: string) => {
+    if ('speechSynthesis' in window) {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 0.9;
+      utterance.pitch = 1;
+      window.speechSynthesis.speak(utterance);
+    }
+  };
+
+
+  const [isLiveMode, setIsLiveMode] = useState(false);
+  const liveSessionRef = useRef<any>(null);
+  const audioContextLiveRef = useRef<AudioContext | null>(null);
+  const audioInputWorkletRef = useRef<any>(null);
+  const audioOutputWorkletRef = useRef<any>(null);
+  const liveVideoRef = useRef<HTMLVideoElement>(null);
+  const liveCanvasRef = useRef<HTMLCanvasElement>(null);
+  const frameIntervalRef = useRef<any>(null);
+  const audioQueueRef = useRef<Int16Array[]>([]);
+  const isPlayingLiveRef = useRef(false);
+
+  const startLiveSession = async () => {
+    try {
+      setIsLiveMode(true);
+      setVoiceAiStatus("Connecting Live...");
+
+      const session = await aiEngine.connectLive({
+        onopen: () => {
+          console.log("Live session opened");
+          setVoiceAiStatus("Live Active");
+          startAudioCapture(session);
+          startVideoCapture(session);
+        },
+        onmessage: (message) => {
+          if (message.serverContent?.modelTurn?.parts) {
+            for (const part of message.serverContent.modelTurn.parts) {
+              if (part.inlineData?.data) {
+                const base64Data = part.inlineData.data;
+                const binaryString = atob(base64Data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+                }
+                const pcmData = new Int16Array(bytes.buffer);
+                audioQueueRef.current.push(pcmData);
+                if (!isPlayingLiveRef.current) {
+                  playNextAudioChunk();
+                }
+              }
+            }
+          }
+          if (message.serverContent?.interrupted) {
+            audioQueueRef.current = [];
+            isPlayingLiveRef.current = false;
+          }
+        },
+        onerror: (err) => {
+          console.error("Live session error:", err);
+          stopLiveSession();
+        },
+        onclose: () => {
+          console.log("Live session closed");
+          stopLiveSession();
+        }
+      });
+
+      liveSessionRef.current = session;
+    } catch (err) {
+      console.error("Failed to start live session:", err);
+      stopLiveSession();
+    }
+  };
+
+  const stopLiveSession = () => {
+    setIsLiveMode(false);
+    setVoiceAiStatus("");
+    if (liveSessionRef.current) {
+      liveSessionRef.current.close();
+      liveSessionRef.current = null;
+    }
+    stopAudioCapture();
+    stopVideoCapture();
+    audioQueueRef.current = [];
+    isPlayingLiveRef.current = false;
+  };
+
+  const startAudioCapture = async (session: any) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioContext = new AudioContext({ sampleRate: 16000 });
+      audioContextLiveRef.current = audioContext;
+
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        const pcmData = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+        }
+        
+        const base64Data = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+        session.sendRealtimeInput({
+          audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+        });
+      };
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      audioInputWorkletRef.current = { stream, processor, source };
+    } catch (err) {
+      console.error("Audio capture failed:", err);
+    }
+  };
+
+  const stopAudioCapture = () => {
+    if (audioInputWorkletRef.current) {
+      audioInputWorkletRef.current.stream.getTracks().forEach((t: any) => t.stop());
+      audioInputWorkletRef.current.processor.disconnect();
+      audioInputWorkletRef.current.source.disconnect();
+      audioInputWorkletRef.current = null;
+    }
+    if (audioContextLiveRef.current) {
+      audioContextLiveRef.current.close();
+      audioContextLiveRef.current = null;
+    }
+  };
+
+  const startVideoCapture = async (session: any) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      if (liveVideoRef.current) {
+        liveVideoRef.current.srcObject = stream;
+      }
+
+      frameIntervalRef.current = setInterval(() => {
+        if (liveVideoRef.current && liveCanvasRef.current) {
+          const context = liveCanvasRef.current.getContext('2d');
+          if (context) {
+            liveCanvasRef.current.width = 320;
+            liveCanvasRef.current.height = 240;
+            context.drawImage(liveVideoRef.current, 0, 0, 320, 240);
+            const base64Data = liveCanvasRef.current.toDataURL('image/jpeg', 0.5).split(',')[1];
+            session.sendRealtimeInput({
+              video: { data: base64Data, mimeType: 'image/jpeg' }
+            });
+          }
+        }
+      }, 1000); // Send frame every second
+    } catch (err) {
+      console.error("Video capture failed:", err);
+    }
+  };
+
+  const stopVideoCapture = () => {
+    if (liveVideoRef.current && liveVideoRef.current.srcObject) {
+      const stream = liveVideoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(t => t.stop());
+      liveVideoRef.current.srcObject = null;
+    }
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
+  };
+
+  const playNextAudioChunk = () => {
+    if (audioQueueRef.current.length === 0) {
+      isPlayingLiveRef.current = false;
+      return;
+    }
+
+    isPlayingLiveRef.current = true;
+    const pcmData = audioQueueRef.current.shift()!;
+    const audioContext = audioContextLiveRef.current;
+    if (!audioContext) return;
+
+    const floatData = new Float32Array(pcmData.length);
+    for (let i = 0; i < pcmData.length; i++) {
+      floatData[i] = pcmData[i] / 0x7FFF;
+    }
+
+    const buffer = audioContext.createBuffer(1, floatData.length, 16000);
+    buffer.getChannelData(0).set(floatData);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+    source.onended = () => {
+      playNextAudioChunk();
+    };
+    source.start();
+  };
+
+  const [aiSuggestionsList, setAiSuggestionsList] = useState<{ text: string, selected: boolean }[]>([]);
+  const [showSuggestionsDropdown, setShowSuggestionsDropdown] = useState(false);
+  const [relatedCasesList, setRelatedCasesList] = useState<{ citation: string, description: string, selected: boolean, placement: string, reason: string }[]>([]);
+  const [showCasesDropdown, setShowCasesDropdown] = useState(false);
+  const [writingDeskPhase, setWritingDeskPhase] = useState<'facts' | 'suggestions' | 'cases' | 'final'>('facts');
 
   // AI Engine & DB
   const aiEngine = HybridAIEngine.getInstance();
@@ -165,7 +453,7 @@ export default function AdvocatePortal() {
   const [consoleInput, setConsoleInput] = useState("");
   const [consoleLoading, setConsoleLoading] = useState(false);
   const [notifications, setNotifications] = useState<any[]>([
-    { id: 1, message: "Welcome to Nexus Justice v3.1 Hybrid. Your offline brain is ready for download.", date: "2026-03-24", read: false, type: 'general' },
+    { id: 1, message: "Welcome to Nexus Justice v3.1. Your AI Orchestrator is ready.", date: "2026-03-24", read: false, type: 'general' },
   ]);
   const [supportMsgs, setSupportMsgs] = useState([{ id: 1, role: 'ai', text: 'Hello. I am the Nexus Support AI. Please describe any issues you are facing with the platform.' }]);
   const [supportInput, setSupportInput] = useState("");
@@ -388,31 +676,21 @@ export default function AdvocatePortal() {
         }
       } catch (err) {
         console.error("Database initialization failed:", err);
-        // Fallback to in-memory mock data if DB fails
-        setClients([
-          { id: 1, name: 'Sreedharan K. (Offline)', phone: '+91 9876543210', court: 'District Court, Aluva', case_number: 'OS 145/2025', next_date: '2026-03-15', purpose: 'Filing Written Statement' },
-          { id: 2, name: 'Elena Rodriguez (Offline)', phone: '+1 555-0199', court: 'High Court', case_number: 'WP(C) 204/2026', next_date: '2026-03-20', purpose: 'Hearing' },
-        ]);
       }
       
       const checkStatus = async () => {
         const status = aiEngine.getStatus();
-        try {
-          // Ping Ollama to see if it's actually running and if model is present
-          const res = await axios.get('http://localhost:11434/api/tags', { timeout: 2000 });
-          const models = res.data.models || [];
-          const hasGemma = models.some((m: any) => m.name.includes('gemma3') && m.name.includes('1b'));
-          status.ollamaReady = hasGemma;
-        } catch (e) {
-          status.ollamaReady = false;
-        }
         setAiStatus(status);
       };
       
       checkStatus();
       const statusInterval = setInterval(checkStatus, 10000);
       
-      if (localStorage.getItem('onboarding_complete')) setShowOnboarding(false);
+      if (!localStorage.getItem('onboarding_complete')) {
+        setShowOnboarding(true);
+        setOnboardingStep(1);
+      }
+
       return () => clearInterval(statusInterval);
     };
     init();
@@ -546,7 +824,7 @@ export default function AdvocatePortal() {
     Please provide a professional, helpful response as the AI Assistant for the advocate. Keep it concise.`;
 
     try {
-      const response = await aiEngine.generateResponse(prompt, [], 'sarvam');
+      const response = await aiEngine.generateResponse(prompt, [], 'gemini');
       const aiResponse = response.text;
       
       const updatedCall = {
@@ -556,13 +834,13 @@ export default function AdvocatePortal() {
           { role: "client", text: "Hello? Is the advocate there?" },
           { role: "ai", text: aiResponse }
         ],
-        summary: `AI Auto-Answered (Sarvam): ${aiResponse.substring(0, 50)}...`
+        summary: `AI Auto-Answered (Gemini): ${aiResponse.substring(0, 50)}...`
       };
 
       // In a real app, we'd add to SIMULATED_CALLS or DB
       setNotifications(prev => [{
         id: Date.now(),
-        message: `AI Auto-Answered a call from ${call.clientName} using Sarvam.`,
+        message: `AI Auto-Answered a call from ${call.clientName} using Gemini.`,
         date: new Date().toISOString().split('T')[0],
         read: false,
         type: 'call'
@@ -640,10 +918,16 @@ export default function AdvocatePortal() {
     if (!converterInputText.trim()) return;
     setIsConverting(true);
     setConverterPhase('translating');
-    setVoiceAiStatus("Translating (Sarvam Mayura)...");
+    setVoiceAiStatus("Translating (Gemini)...");
     
     try {
-      const translated = await aiEngine.sarvamTranslate(converterInputText, converterTargetLang);
+      const prompt = `Translate the following text to ${converterTargetLang}. Keep the legal terminology accurate.
+      
+      TEXT:
+      ${converterInputText}`;
+      
+      const response = await aiEngine.generateResponse(prompt, [], 'gemini');
+      const translated = response.text;
       if (translated) {
         setConverterTranslatedText(translated);
         setNotifications(prev => [{ id: Date.now(), message: "Document translated successfully.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
@@ -723,23 +1007,30 @@ export default function AdvocatePortal() {
 
       setScannedText(extractedText || "");
       setScanProgress(60);
-      setVoiceAiStatus("Sarvam Vision is reading...");
+      setVoiceAiStatus("Gemini is reading...");
 
-      // Now use Sarvam Vision to analyze the document image
+      // Now use Gemini to analyze the document image
       const visionPrompt = `I have scanned a legal document. Please analyze this document, identify the parties involved, the main obligations, and any potential legal risks. Use a professional legal tone.`;
 
-      const visionResponse = await aiEngine.sarvamVision(visionPrompt, imageBase64);
+      const response = await aiEngine.generateResponse(
+        visionPrompt, 
+        [], 
+        'gemini', 
+        imageBase64, 
+        undefined, 
+        (status) => setVoiceAiStatus(status)
+      );
       
-      if (visionResponse) {
+      if (response && response.text) {
         const baseText = extractedText ? `--- EXTRACTED TEXT ---\n${extractedText}\n\n` : "";
-        const finalContent = `${baseText}--- SARVAM VISION ANALYSIS ---\n${visionResponse}`;
+        const finalContent = `${baseText}--- GEMINI ANALYSIS ---\n${response.text}`;
         setScannedText(finalContent);
-        speakResponse(visionResponse);
+        speakResponse(response.text);
         saveScanToDb(finalContent, imageBase64);
       } else if (extractedText && extractedText.trim().length >= 5) {
-        // Fallback to Gemma 3 if Sarvam Vision fails but we have OCR text
-        setVoiceAiStatus("Gemma 3 is reading...");
-        const gemmaPrompt = `I have scanned a legal document. Here is the extracted text:
+        // Fallback to Gemini if vision analysis fails but we have OCR text
+        setVoiceAiStatus("Gemini is reading...");
+        const summaryPrompt = `I have scanned a legal document. Here is the extracted text:
         
         --- START OF TEXT ---
         ${extractedText}
@@ -748,15 +1039,15 @@ export default function AdvocatePortal() {
         Please analyze this document, identify the parties involved, the main obligations, and any potential legal risks. Use a professional legal tone.`;
 
         const response = await aiEngine.generateResponse(
-          gemmaPrompt, 
+          summaryPrompt, 
           [], 
-          'ollama', // Force Gemma 3
+          'gemini', 
           undefined, 
           undefined, 
           (status) => setVoiceAiStatus(status)
         );
 
-        setScannedText(prev => `--- EXTRACTED TEXT ---\n${prev}\n\n--- GEMMA 3 ANALYSIS ---\n${response.text}`);
+        setScannedText(prev => `--- EXTRACTED TEXT ---\n${prev}\n\n--- GEMINI ANALYSIS ---\n${response.text}`);
         speakResponse(response.text);
       } else {
         // Both failed
@@ -786,7 +1077,6 @@ export default function AdvocatePortal() {
 
   const sanitizeForSpeech = (text: string) => {
     return text
-      .replace(/Offline Brain \(Gemma 3\):/gi, '')
       .replace(/\[Offline Mode\]/gi, '')
       .replace(/\[Offline Vision Mode\]/gi, '')
       .replace(/(\*\*|__)(.*?)\1/g, '$2')
@@ -837,34 +1127,32 @@ export default function AdvocatePortal() {
   };
 
   const generateDraft = async () => {
-    if (!caseFacts.trim() && !writingPad.trim()) {
-      setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Please provide some facts or notes in the writing pad first.", engine: 'Nexus AI' }]);
+    if (!caseFacts.trim()) {
+      setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Please provide some facts first.", engine: 'Nexus AI' }]);
       return;
     }
     
     setDeskLoading(true);
-    setVoiceAiStatus("Sarvam AI is drafting...");
+    setVoiceAiStatus("Gemini is drafting...");
     
     const prompt = `Draft a legal petition/plaint based on the following facts:
     
     FACTS:
     ${caseFacts}
     
-    NOTES:
-    ${writingPad}
-    
     ${draftingModel ? `USE THIS MODEL/TEMPLATE AS A GUIDE:\n${draftingModel}` : ''}
     
     Please provide a professional legal draft.`;
 
     try {
-      // Force Sarvam for drafting
-      const response = await aiEngine.generateResponse(prompt, [], 'sarvam', undefined, undefined, (status) => setVoiceAiStatus(status));
+      const response = await aiEngine.generateResponse(prompt, [], 'gemini', undefined, undefined, (status) => setVoiceAiStatus(status));
       setDraftPages([response.text]);
-      setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Draft generated by Sarvam AI. Check the main editor.", engine: 'Sarvam AI' }]);
+      setDeskChatHistory(prev => [...prev, { role: 'user', text: "Generate Draft" }, { role: 'ai', text: "Draft generated. Now analyzing for suggestions...", engine: 'Gemini' }]);
       
       // Get suggestions after drafting
-      getAiSuggestions(response.text);
+      await getAiSuggestions(response.text);
+      setWritingDeskPhase('suggestions');
+      setShowSuggestionsDropdown(true);
     } catch (err) {
       console.error(err);
       setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Drafting failed. Please try again.", engine: 'Error' }]);
@@ -875,35 +1163,114 @@ export default function AdvocatePortal() {
   };
 
   const getAiSuggestions = async (draft: string) => {
-    setVoiceAiStatus("Gemini is analyzing...");
-    const prompt = `Analyze this legal draft and provide 3-4 specific suggestions for improvement or missing legal points. Format as a list.
+    setVoiceAiStatus("Gemini is analyzing for suggestions...");
+    const prompt = `Analyze this legal draft and provide 5-6 specific, legally helpful suggestions or missing points. 
+    Format each suggestion on a new line starting with a bullet point.
     
     DRAFT:
     ${draft}`;
 
     try {
-      // Force Gemini for suggestions
       const response = await aiEngine.generateResponse(prompt, [], 'gemini', undefined, undefined, (status) => setVoiceAiStatus(status));
-      const suggestions = response.text.split('\n').filter(s => s.trim().length > 5).slice(0, 4);
-      setAiSuggestions(suggestions);
+      const suggestions = response.text.split('\n')
+        .filter(s => s.trim().length > 10)
+        .map(s => ({ text: s.replace(/^[-*•]\s*/, '').trim(), selected: false }));
+      setAiSuggestionsList(suggestions);
     } catch (err) {
       console.error(err);
     }
   };
 
+  const getRelatedCases = async () => {
+    setDeskLoading(true);
+    setVoiceAiStatus("Gemini is searching for related cases...");
+    
+    const selectedSuggestions = aiSuggestionsList.filter(s => s.selected).map(s => s.text).join('\n');
+    
+    const prompt = `Based on the following case facts and selected legal points, find 3-4 important related Indian court cases with official citations.
+    For each case, provide:
+    1. Citation (e.g., AIR 2020 SC 123)
+    2. Brief description of the ruling.
+    
+    FACTS:
+    ${caseFacts}
+    
+    SELECTED POINTS:
+    ${selectedSuggestions}
+    
+    Please use official portals for citations.`;
+
+    try {
+      const response = await aiEngine.generateResponse(prompt, [], 'gemini', undefined, undefined, (status) => setVoiceAiStatus(status));
+      const cases = response.text.split('\n\n').filter(c => c.trim().length > 20).map(c => ({
+        citation: c.split('\n')[0].replace(/^\d+\.\s*/, '').trim(),
+        description: c.split('\n').slice(1).join(' ').trim(),
+        selected: false,
+        placement: '',
+        reason: ''
+      }));
+      setRelatedCasesList(cases);
+      setWritingDeskPhase('cases');
+      setShowCasesDropdown(true);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setDeskLoading(false);
+      setVoiceAiStatus("");
+    }
+  };
+
+  const recreateDraft = async () => {
+    setDeskLoading(true);
+    setVoiceAiStatus("Gemini is recreating the final draft...");
+    
+    const selectedSuggestions = aiSuggestionsList.filter(s => s.selected).map(s => s.text).join('\n');
+    const selectedCases = relatedCasesList.filter(c => c.selected).map(c => `CASE: ${c.citation}\nPLACEMENT: ${c.placement}\nREASON: ${c.reason}`).join('\n\n');
+    
+    const prompt = `Recreate the legal draft incorporating the following selected legal points and case citations.
+    
+    ORIGINAL FACTS:
+    ${caseFacts}
+    
+    SELECTED LEGAL POINTS:
+    ${selectedSuggestions}
+    
+    SELECTED CASE CITATIONS:
+    ${selectedCases}
+    
+    PREVIOUS DRAFT:
+    ${draftPages[0]}
+    
+    Please provide the final, polished legal draft.`;
+
+    try {
+      const response = await aiEngine.generateResponse(prompt, [], 'gemini', undefined, undefined, (status) => setVoiceAiStatus(status));
+      setDraftPages([response.text]);
+      setWritingDeskPhase('final');
+      setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Final draft recreated with all your selections. Please review it.", engine: 'Gemini' }]);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setDeskLoading(false);
+      setVoiceAiStatus("");
+    }
+  };
+
   const getAiGuidance = async () => {
     if (!caseFacts.trim()) return;
-    setVoiceAiStatus("Gemini is preparing questions...");
-    const prompt = `Based on the facts provided, ask 3 legally relevant questions to help the advocate refine the drafting.
+    setVoiceAiStatus("Gemini is analyzing facts...");
+    const prompt = `You are a helpful legal assistant. Analyze the following case facts provided by an advocate. 
+    If any legally important information is missing (e.g., dates, specific locations, party details, specific incidents), ask 3-4 clarifying questions to help the advocate refine the facts for drafting.
+    If the facts are sufficient, provide guidance on the legal strategy.
     
     FACTS:
     ${caseFacts}`;
 
     try {
-      // Force Gemini for guidance
       const response = await aiEngine.generateResponse(prompt, [], 'gemini', undefined, undefined, (status) => setVoiceAiStatus(status));
-      const questions = response.text.split('\n').filter(q => q.trim().length > 5).slice(0, 3);
+      const questions = response.text.split('\n').filter(q => q.trim().length > 5).slice(0, 4);
       setAiQuestions(questions);
+      setDeskChatHistory(prev => [...prev, { role: 'ai', text: response.text, engine: 'Gemini' }]);
     } catch (err) {
       console.error(err);
     }
@@ -911,14 +1278,14 @@ export default function AdvocatePortal() {
 
   const integrateSuggestion = async (suggestion: string) => {
     setDeskLoading(true);
-    setVoiceAiStatus("Sarvam is integrating suggestion...");
+    setVoiceAiStatus("Gemini is integrating suggestion...");
     const prompt = `Update the following legal draft by integrating this suggestion: "${suggestion}"
     
     CURRENT DRAFT:
     ${draftPages[0]}`;
 
     try {
-      const response = await aiEngine.generateResponse(prompt, [], 'sarvam', undefined, undefined, (status) => setVoiceAiStatus(status));
+      const response = await aiEngine.generateResponse(prompt, [], 'gemini', undefined, undefined, (status) => setVoiceAiStatus(status));
       setDraftPages([response.text]);
       setAiSuggestions(prev => prev.filter(s => s !== suggestion));
     } catch (err) {
@@ -954,43 +1321,59 @@ export default function AdvocatePortal() {
 
   const toggleRecordFacts = async () => {
     if (isRecordingFacts) {
-      if (mediaRecorderRef.current) {
-        mediaRecorderRef.current.stop();
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
       }
       setIsRecordingFacts(false);
       setVoiceAiStatus("");
     } else {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const mediaRecorder = new MediaRecorder(stream);
-        mediaRecorderRef.current = mediaRecorder;
-        audioChunksRef.current = [];
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          alert("Speech recognition not supported in this browser.");
+          return;
+        }
 
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            audioChunksRef.current.push(event.data);
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-IN';
+
+        recognition.onresult = (event: any) => {
+          let interimTranscript = '';
+          let finalTranscript = '';
+
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript;
+            } else {
+              interimTranscript += event.results[i][0].transcript;
+            }
+          }
+          
+          if (finalTranscript) {
+            setCaseFacts(prev => prev + (prev ? ' ' : '') + finalTranscript);
           }
         };
 
-        mediaRecorder.onstop = async () => {
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-          const reader = new FileReader();
-          reader.readAsDataURL(audioBlob);
-          reader.onloadend = async () => {
-            const base64Audio = (reader.result as string).split(',')[1];
-            setVoiceAiStatus("Sarvam STT is transcribing...");
-            const transcript = await aiEngine.sarvamSTT(base64Audio);
-            if (transcript) {
-              setCaseFacts(prev => prev + (prev ? ' ' : '') + transcript);
-            }
-            setVoiceAiStatus("");
-          };
-          stream.getTracks().forEach(track => track.stop());
+        recognition.onstart = () => {
+          setIsRecordingFacts(true);
+          setVoiceAiStatus("Recording facts (Browser STT)...");
         };
 
-        mediaRecorder.start();
-        setIsRecordingFacts(true);
-        setVoiceAiStatus("Recording facts (Sarvam STT)...");
+        recognition.onend = () => {
+          setIsRecordingFacts(false);
+          setVoiceAiStatus("");
+        };
+
+        recognition.onerror = (event: any) => {
+          console.error("Speech recognition error:", event.error);
+          setIsRecordingFacts(false);
+          setVoiceAiStatus("");
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
       } catch (err) {
         console.error("Failed to start recording:", err);
         alert("Microphone access denied or not supported.");
@@ -1013,34 +1396,7 @@ export default function AdvocatePortal() {
   const speakResponse = useCallback(async (text: string) => {
     if (!text) return;
     
-    // Try Sarvam TTS (Bulbul V3) first
-    const sarvamAudio = await aiEngine.sarvamTTS(text);
-    if (sarvamAudio) {
-      console.log("Using Sarvam TTS (Bulbul V3) for speech.");
-      const audio = new Audio(`data:audio/wav;base64,${sarvamAudio}`);
-      audio.onplay = () => {
-        setVoiceAiSpeaking(true);
-        isSpeakingRef.current = true;
-      };
-      audio.onended = () => {
-        setVoiceAiSpeaking(false);
-        isSpeakingRef.current = false;
-      };
-      audio.onerror = (e) => {
-        console.error("Sarvam TTS playback error:", e);
-        setVoiceAiSpeaking(false);
-        isSpeakingRef.current = false;
-        // Fallback to browser TTS if Sarvam playback fails
-        fallbackToBrowserTTS(text);
-      };
-      audio.play().catch(e => {
-        console.error("Sarvam TTS play failed:", e);
-        fallbackToBrowserTTS(text);
-      });
-      return;
-    }
-
-    // Fallback to browser TTS
+    // Always use browser TTS in this version
     fallbackToBrowserTTS(text);
   }, []);
 
@@ -1411,21 +1767,8 @@ export default function AdvocatePortal() {
   }, []);
 
   useEffect(() => {
-    const checkNeedInstall = async () => {
-      // If Ollama is running but Gemma 3 is missing, show the banner
-      if (!aiStatus.ollamaReady && !aiStatus.offlineBrain && navigator.onLine) {
-        // Double check if Ollama is even reachable
-        try {
-          const res = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(2000) });
-          if (res.ok) {
-            setShowInstallBanner(true);
-          }
-        } catch (e) {
-          // Ollama not running at all, don't show banner yet
-        }
-      }
-    };
-    checkNeedInstall();
+    // No Ollama banner logic needed
+    return () => {};
   }, [aiStatus.ollamaReady, aiStatus.offlineBrain]);
 
   // --- Sidebar & Tab Config ---
@@ -1446,7 +1789,8 @@ export default function AdvocatePortal() {
 
   const S = {
     page: { display: 'flex', height: '100vh', background: '#020617', color: '#e2e8f0', fontFamily: "'Inter', system-ui, sans-serif", overflow: 'hidden', fontSize: 14 },
-    sidebar: { width: 72, background: '#070b14', borderRight: '1px solid rgba(255,255,255,.05)', display: 'flex' as const, flexDirection: 'column' as const, alignItems: 'center', padding: '20px 0', gap: 8, flexShrink: 0, overflowY: 'auto' as const },
+    sidebar: { width: 72, background: '#070b14', borderRight: '1px solid rgba(255,255,255,.05)', display: 'none', flexDirection: 'column' as const, alignItems: 'center', padding: '20px 0', gap: 8, flexShrink: 0, overflowY: 'auto' as const },
+    sidebarDesktop: { width: 72, background: '#070b14', borderRight: '1px solid rgba(255,255,255,.05)', display: 'flex', flexDirection: 'column' as const, alignItems: 'center', padding: '20px 0', gap: 8, flexShrink: 0, overflowY: 'auto' as const },
     sideBtn: (active: boolean) => ({ width: 44, height: 44, borderRadius: 12, background: active ? 'rgba(245,158,11,.1)' : 'transparent', border: active ? '1px solid rgba(245,158,11,.25)' : '1px solid transparent', color: active ? '#f59e0b' : '#475569', cursor: 'pointer', display: 'flex' as const, alignItems: 'center', justifyContent: 'center', position: 'relative' as const, transition: 'all .2s', flexShrink: 0 }),
     header: { height: 56, background: '#0a0f1d', borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 24px', flexShrink: 0 },
     card: { background: '#0a0f1d', borderRadius: 24, padding: 28, border: '1px solid rgba(255,255,255,.05)' },
@@ -1454,6 +1798,19 @@ export default function AdvocatePortal() {
 
   return (
     <div style={S.page}>
+      {/* Temporary Admin Entry Overlay */}
+      {!hasEntered && (
+        <div className="fixed inset-0 z-[9999] bg-[#020617] flex flex-col items-center justify-center gap-5 p-6 text-center">
+          <p className="text-[10px] md:text-xs font-black text-slate-500 tracking-[0.2em] uppercase">Nexus Justice Admin Bypass</p>
+          <button 
+            onClick={() => setHasEntered(true)}
+            className="w-20 h-20 md:w-24 md:h-24 rounded-full bg-[#ffdbac] flex items-center justify-center cursor-pointer shadow-[0_0_50px_rgba(255,219,172,0.2)] transition-transform active:scale-95"
+          >
+            <ChevronRight size={48} className="md:w-[60px] md:h-[60px] text-[#020617] stroke-[3]" />
+          </button>
+          <p className="text-[10px] text-slate-400">Click to enter Command Center</p>
+        </div>
+      )}
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
@@ -1489,7 +1846,7 @@ export default function AdvocatePortal() {
       `}</style>
 
       {/* SIDEBAR */}
-      <div style={S.sidebar}>
+      <div className="hidden md:flex" style={S.sidebarDesktop}>
         <div style={{ width: 44, height: 44, background: '#f59e0b', borderRadius: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginBottom: 12, boxShadow: '0 4px 20px rgba(245,158,11,.3)', flexShrink: 0 }}>
           <span style={{ fontSize: 22, fontWeight: 900, color: '#000', fontStyle: 'italic' }}>T</span>
         </div>
@@ -1505,21 +1862,22 @@ export default function AdvocatePortal() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
         {/* Header */}
-        <header style={S.header}>
+        <header style={S.header} className="px-4 md:px-6">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <h1 className="text-sm font-black tracking-widest uppercase">
-              Nexus <span className="text-indigo-500">Justice</span> <span className="text-[10px] text-slate-500 ml-2">v3.1 Hybrid</span>
+            <h1 className="text-[10px] md:text-sm font-black tracking-widest uppercase">
+              Nexus <span className="text-indigo-500">Justice</span> <span className="hidden md:inline text-[10px] text-slate-500 ml-2">v3.1 Hybrid</span>
             </h1>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div className={`px-3 py-1 rounded-full flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest ${
+          <div className="flex items-center gap-2 md:gap-8">
+            <div className={`px-2 md:px-3 py-1 rounded-full flex items-center gap-1 md:gap-2 text-[8px] md:text-[10px] font-bold uppercase tracking-widest ${
               isOffline ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'
             }`}>
-              {isOffline ? <WifiOff size={12} /> : <Wifi size={12} />}
-              {isOffline ? 'Local Mode' : 'Cloud Active'}
+              {isOffline ? <WifiOff size={10} /> : <Wifi size={10} />}
+              <span className="hidden md:inline">{isOffline ? 'Local Mode' : 'Cloud Active'}</span>
+              <span className="md:hidden">{isOffline ? 'Local' : 'Cloud'}</span>
             </div>
-            <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,.1)' }} />
-            <div style={{ padding: '4px 12px', background: 'rgba(255,255,255,.05)', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 16 }}>
+            <div className="hidden md:block" style={{ width: 1, height: 20, background: 'rgba(255,255,255,.1)' }} />
+            <div className="px-2 md:px-3 py-1 bg-white/5 rounded-full flex items-center gap-3 md:gap-4">
               <button onClick={refreshAiStatus} title="Refresh AI Status" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <RefreshCw size={10} />
               </button>
@@ -1531,56 +1889,6 @@ export default function AdvocatePortal() {
                 <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.geminiReady ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
                 <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.geminiReady ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
                   Gemini 2.5: {aiStatus.geminiReady ? 'Active' : 'Offline'}
-                </span>
-              </div>
-              
-              <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,.1)' }} />
-
-              {/* Sarvam Status */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.sarvamReady ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
-                <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.sarvamReady ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                  Sarvam: {aiStatus.sarvamReady ? 'Active' : 'Offline'}
-                </span>
-              </div>
-
-              <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,.1)' }} />
-
-              {/* Gemma 3 Status */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span className="pulse-a" style={{ 
-                  width: 6, height: 6, borderRadius: '50%', 
-                  background: aiStatus.ollamaReady ? '#10b981' : aiStatus.offlineBrain ? '#f59e0b' : '#f43f5e', 
-                  display: 'inline-block' 
-                }} />
-                <div style={{ display: 'flex', flexDirection: 'column' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ 
-                      fontSize: 9, fontWeight: 900, 
-                      color: aiStatus.ollamaReady ? '#10b981' : aiStatus.offlineBrain ? '#f59e0b' : '#f43f5e', 
-                      letterSpacing: '0.1em', textTransform: 'uppercase' 
-                    }}>
-                      Gemma 3: {aiStatus.ollamaReady ? 'Active' : aiStatus.offlineBrain ? 'Offline (Installed)' : 'Not Installed'}
-                    </span>
-                    <button onClick={refreshAiStatus} title="Refresh Gemma 3 Status" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>
-                      <RotateCcw size={8} />
-                    </button>
-                  </div>
-                  {!aiStatus.ollamaReady && (
-                    <button onClick={() => setView('config')} style={{ fontSize: 7, color: '#f59e0b', background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', textDecoration: 'underline', fontWeight: 900, textTransform: 'uppercase' }}>
-                      {aiStatus.offlineBrain ? 'Check Connection' : 'Install Brain'}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,.1)' }} />
-
-              {/* Transformers.js Status */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.transformersReady ? '#10b981' : aiStatus.transformersLoading ? '#f59e0b' : '#f43f5e', display: 'inline-block' }} />
-                <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.transformersReady ? '#10b981' : aiStatus.transformersLoading ? '#f59e0b' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                  Browser AI: {aiStatus.transformersReady ? 'Ready' : aiStatus.transformersLoading ? 'Loading...' : 'Offline'}
                 </span>
               </div>
             </div>
@@ -1599,45 +1907,9 @@ export default function AdvocatePortal() {
           </div>
         </div>
 
-        {/* INSTALL BANNER */}
-        {showInstallBanner && (
-          <div style={{ background: '#f59e0b', color: '#000', padding: '8px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Brain size={14} />
-              <span>Nexus Justice needs to download its local brain (Gemma 3) for offline legal support.</span>
-            </div>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <button onClick={handleInstallBrain} style={{ background: '#000', color: '#f59e0b', border: 'none', padding: '4px 12px', borderRadius: 6, fontSize: 10, fontWeight: 900, cursor: 'pointer' }}>
-                Download & Install Now
-              </button>
-              <button onClick={() => setShowInstallBanner(false)} style={{ background: 'none', border: 'none', color: '#000', cursor: 'pointer', opacity: 0.6 }}>
-                <X size={14} />
-              </button>
-            </div>
-          </div>
-        )}
+        {/* NO INSTALL BANNER */}
 
-        {/* INSTALL PROGRESS OVERLAY */}
-        {installingBrain && (
-          <div style={{ position: 'fixed', bottom: 24, right: 24, width: 300, background: '#0a0f1d', border: '1px solid #f59e0b', borderRadius: 16, padding: 20, zIndex: 1000, boxShadow: '0 10px 40px rgba(0,0,0,0.5)', animation: 'fadeUp 0.3s ease' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-              <div className="spin" style={{ color: '#f59e0b' }}>
-                <RotateCcw size={20} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 12, fontWeight: 900, color: '#f59e0b' }}>Downloading Brain...</div>
-                <div style={{ fontSize: 10, color: '#64748b' }}>Gemma 3-1B-it (Ollama)</div>
-              </div>
-              <div style={{ fontSize: 12, fontWeight: 900 }}>{installProgress}%</div>
-            </div>
-            <div style={{ height: 6, background: 'rgba(255,255,255,.05)', borderRadius: 3, overflow: 'hidden' }}>
-              <div style={{ height: '100%', background: '#f59e0b', width: `${installProgress}%`, transition: 'width 0.1s' }} />
-            </div>
-            <p style={{ fontSize: 9, color: '#475569', marginTop: 12, margin: 0, lineHeight: 1.4 }}>
-              This will take a few minutes. You can continue using the app while the brain downloads.
-            </p>
-          </div>
-        )}
+        {/* NO INSTALL PROGRESS OVERLAY */}
 
         {/* Content */}
         <main style={{ flex: 1, overflow: 'hidden', position: 'relative', background: '#020617' }}>
@@ -1677,9 +1949,9 @@ export default function AdvocatePortal() {
             
             {/* COMMAND */}
             {view === 'command' && (
-              <motion.div key="command" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', gap: 24, padding: 24, overflow: 'hidden' }}>
-                <div style={{ width: 320, display: 'flex', flexDirection: 'column', gap: 16, flexShrink: 0 }}>
-                  <div style={S.card}>
+              <motion.div key="command" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-col md:flex-row h-full gap-6 p-4 md:p-6 overflow-y-auto md:overflow-hidden">
+                <div className="w-full md:w-80 flex flex-col gap-4 flex-shrink-0">
+                  <div style={S.card} className="p-6 md:p-7">
                     <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 32, marginBottom: 16, opacity: 0.8 }}>
                       {[0.4, 0.7, 0.5, 0.9, 0.6, 0.8, 0.4, 0.7, 0.5, 0.9, 0.6, 0.8, 0.4, 0.7, 0.5, 0.9, 0.6, 0.8].map((h, i) => (
                         <div key={i} style={{ 
@@ -1691,55 +1963,35 @@ export default function AdvocatePortal() {
                         }} />
                       ))}
                     </div>
-                    <div style={{ color: '#f59e0b', fontSize: 9, fontWeight: 900, letterSpacing: '0.3em', textTransform: 'uppercase', marginBottom: 6 }}>Hybrid AI Node</div>
+                    <div style={{ color: '#6366f1', fontSize: 9, fontWeight: 900, letterSpacing: '0.3em', textTransform: 'uppercase', marginBottom: 6 }}>Gemini Orchestrator</div>
                     <h3 style={{ fontSize: 28, fontWeight: 900, fontStyle: 'italic', letterSpacing: '-0.03em', marginBottom: 16 }}>Command<span style={{ color: '#475569' }}>Center</span></h3>
                     
                     {/* Voice Node Controls */}
                     <div style={{ background: 'rgba(255,255,255,.03)', borderRadius: 16, padding: 16, border: '1px solid rgba(255,255,255,.05)', marginBottom: 16 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <span style={{ fontSize: 10, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase' }}>Live Node</span>
+                        <div style={{ width: 8, height: 8, borderRadius: '50%', background: isLiveMode ? '#10b981' : '#475569', boxShadow: isLiveMode ? '0 0 10px #10b981' : 'none' }} />
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                        <button onClick={() => isLiveMode ? stopLiveSession() : startLiveSession()} style={{ flex: 1, padding: '8px 0', background: isLiveMode ? '#ef4444' : '#6366f1', border: 'none', borderRadius: 8, color: '#fff', fontSize: 10, fontWeight: 900 }}>
+                          {isLiveMode ? 'Stop Live' : 'Start Live'}
+                        </button>
+                      </div>
+                      
+                      {isLiveMode && (
+                        <div style={{ position: 'relative', width: '100%', height: 120, borderRadius: 12, overflow: 'hidden', background: '#000', marginBottom: 12 }}>
+                          <video ref={liveVideoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          <canvas ref={liveCanvasRef} style={{ display: 'none' }} />
+                          <div style={{ position: 'absolute', bottom: 8, left: 8, background: 'rgba(0,0,0,.5)', padding: '2px 6px', borderRadius: 4, fontSize: 8, color: '#fff', fontWeight: 900 }}>LIVE VISION</div>
+                        </div>
+                      )}
+
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                         <span style={{ fontSize: 10, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase' }}>Voice Node</span>
                         <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#10b981', boxShadow: '0 0 10px #10b981' }} />
                       </div>
                       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
                         <button onClick={() => setVoiceAiOn(!voiceAiOn)} style={{ flex: 1, padding: '8px 0', background: voiceAiOn ? '#ef4444' : '#6366f1', border: 'none', borderRadius: 8, color: '#fff', fontSize: 10, fontWeight: 900 }}>{voiceAiOn ? 'Stop' : 'Start'}</button>
-                        <button 
-                          onClick={() => {
-                            if (aiStatus.offlineBrain) return;
-                            setInstallingBrain(true);
-                            setInstallProgress(0);
-                            const interval = setInterval(() => {
-                              setInstallProgress(prev => {
-                                if (prev >= 100) {
-                                  clearInterval(interval);
-                                  localStorage.setItem('offline_brain_installed', 'true');
-                                  setAiStatus(aiEngine.getStatus());
-                                  setInstallingBrain(false);
-                                  alert("Offline Brain (Gemma 3-1B-it) installed successfully. Note: This is a simulation. For real local inference, install Ollama.");
-                                  return 100;
-                                }
-                                return prev + 5;
-                              });
-                            }, 100);
-                          }} 
-                          disabled={installingBrain}
-                          style={{ 
-                            flex: 1, 
-                            padding: '8px 0', 
-                            background: aiStatus.offlineBrain ? 'rgba(16,185,129,.1)' : installingBrain ? 'rgba(255,255,255,.05)' : 'rgba(245,158,11,.1)', 
-                            border: aiStatus.offlineBrain ? '1px solid rgba(16,185,129,.3)' : '1px solid rgba(245,158,11,.3)', 
-                            borderRadius: 8, 
-                            color: aiStatus.offlineBrain ? '#10b981' : '#f59e0b', 
-                            fontSize: 10, 
-                            fontWeight: 900,
-                            position: 'relative',
-                            overflow: 'hidden'
-                          }}
-                        >
-                          {installingBrain ? `Installing ${installProgress}%` : aiStatus.offlineBrain ? 'Brain Ready' : 'Install Brain'}
-                          {installingBrain && (
-                            <div style={{ position: 'absolute', bottom: 0, left: 0, height: 2, background: '#f59e0b', width: `${installProgress}%`, transition: 'width 0.1s' }} />
-                          )}
-                        </button>
                       </div>
                       
                       {/* Auto Answer Toggle */}
@@ -1877,112 +2129,55 @@ export default function AdvocatePortal() {
                   <div style={S.card}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
                       <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6366f1' }}>
-                        <Zap size={20} />
+                        <Users size={20} />
                       </div>
                       <div>
-                        <h3 style={{ fontSize: 16, fontWeight: 900 }}>Browser-side AI</h3>
-                        <p style={{ fontSize: 11, color: '#475569' }}>Transformers.js (Zero-install)</p>
+                        <h3 style={{ fontSize: 16, fontWeight: 900 }}>User Profile</h3>
+                        <p style={{ fontSize: 11, color: '#475569' }}>{user?.email || 'Not logged in'}</p>
                       </div>
                     </div>
                     
-                    <div style={{ background: 'rgba(255,255,255,.02)', borderRadius: 16, padding: 20, border: '1px solid rgba(255,255,255,.05)' }}>
-                      <div style={{ marginBottom: 16 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Status: {aiStatus.transformersReady ? 'Ready' : aiStatus.transformersLoading ? 'Initializing...' : 'Not Initialized'}</div>
-                        <p style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5 }}>
-                          Transformers.js runs AI directly in your browser using WebGPU or WASM. 
-                          No local server required. The model is downloaded once and cached.
-                        </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        {user?.photoURL ? (
+                          <img src={user.photoURL} alt="Profile" style={{ width: 48, height: 48, borderRadius: 12, border: '1px solid rgba(255,255,255,.1)' }} referrerPolicy="no-referrer" />
+                        ) : (
+                          <div style={{ width: 48, height: 48, borderRadius: 12, background: 'rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <Users size={24} className="text-slate-500" />
+                          </div>
+                        )}
+                        <div>
+                          <p style={{ fontSize: 14, fontWeight: 900, margin: 0 }}>{user?.displayName || 'Advocate'}</p>
+                          <p style={{ fontSize: 11, color: '#475569', margin: 0 }}>Verified Advocate Account</p>
+                        </div>
                       </div>
                       
-                      {aiStatus.transformersLoading ? (
-                        <div style={{ textAlign: 'center', padding: 10 }}>
-                          <div className="animate-spin w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full mx-auto mb-2" />
-                          <div style={{ fontSize: 10, color: '#6366f1', fontWeight: 900 }}>INITIALIZING ENGINE...</div>
-                        </div>
-                      ) : aiStatus.transformersReady ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#10b981', fontSize: 12, fontWeight: 700 }}>
-                          <CheckCircle size={16} /> Browser AI is active.
-                        </div>
-                      ) : (
-                        <button 
-                          onClick={async () => {
-                            await aiEngine.initTransformers();
-                            setAiStatus(aiEngine.getStatus());
-                          }}
-                          style={{ width: '100%', padding: '14px', background: '#6366f1', border: 'none', borderRadius: 12, color: '#fff', fontWeight: 900, fontSize: 13, cursor: 'pointer' }}
-                        >
-                          Activate Browser AI
-                        </button>
-                      )}
+                      <button 
+                        onClick={handleLogout}
+                        style={{ width: '100%', padding: '12px', borderRadius: 12, background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.2)', color: '#ef4444', fontSize: 12, fontWeight: 900, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                      >
+                        <RotateCcw size={16} />
+                        Logout from Nexus Justice
+                      </button>
                     </div>
                   </div>
 
                   <div style={S.card}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-                      <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(245,158,11,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f59e0b' }}>
-                        <Download size={20} />
+                      <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6366f1' }}>
+                        <Zap size={20} />
                       </div>
                       <div>
-                        <h3 style={{ fontSize: 16, fontWeight: 900 }}>Offline Brain Facility</h3>
-                        <p style={{ fontSize: 11, color: '#475569' }}>Local legal AI installation (Ollama)</p>
+                        <h3 style={{ fontSize: 16, fontWeight: 900 }}>AI Orchestrator</h3>
+                        <p style={{ fontSize: 11, color: '#475569' }}>Gemini 2.5 Flash-Live (Sole AI Engine)</p>
                       </div>
                     </div>
                     
                     <div style={{ background: 'rgba(255,255,255,.02)', borderRadius: 16, padding: 20, border: '1px solid rgba(255,255,255,.05)' }}>
-                      <div style={{ marginBottom: 16 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Status: {aiStatus.offlineBrain ? 'Installed' : 'Not Installed'}</div>
-                        <p style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5 }}>
-                          The Offline Brain (Gemma 3-1B-it) allows you to process legal queries without an internet connection. 
-                          This is essential for high-privacy consultations.
-                        </p>
-                      </div>
-                      
-                      {installingBrain ? (
-                        <div style={{ marginBottom: 16 }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, fontWeight: 900, marginBottom: 6, textTransform: 'uppercase' }}>
-                            <span>Downloading Gemma 3-1B-it...</span>
-                            <span>{installProgress}%</span>
-                          </div>
-                          <div style={{ height: 6, background: 'rgba(255,255,255,.05)', borderRadius: 3, overflow: 'hidden' }}>
-                            <div style={{ height: '100%', background: '#f59e0b', width: `${installProgress}%`, transition: 'width 0.1s' }} />
-                          </div>
-                        </div>
-                      ) : aiStatus.ollamaReady ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#10b981', fontSize: 12, fontWeight: 700 }}>
-                          <CheckCircle size={16} /> Gemma 3 is active and ready for offline use.
-                        </div>
-                      ) : aiStatus.offlineBrain ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#f59e0b', fontSize: 12, fontWeight: 700 }}>
-                            <div className="animate-pulse w-2 h-2 rounded-full bg-amber-500" /> 
-                            Gemma 3 is installed but the server is unreachable.
-                          </div>
-                          <button 
-                            onClick={refreshAiStatus}
-                            style={{ width: '100%', padding: '12px', background: 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.2)', borderRadius: 12, color: '#f59e0b', fontWeight: 900, fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
-                          >
-                            <RotateCcw size={14} /> Retry Connection
-                          </button>
-                        </div>
-                      ) : (
-                        <button 
-                          onClick={handleInstallBrain}
-                          style={{ width: '100%', padding: '14px', background: '#f59e0b', border: 'none', borderRadius: 12, color: '#000', fontWeight: 900, fontSize: 13, cursor: 'pointer' }}
-                        >
-                          Install Gemma 3 Now
-                        </button>
-                      )}
-                    </div>
-                    <div style={{ marginTop: 20, padding: 16, background: 'rgba(255,255,255,.03)', borderRadius: 16, border: '1px solid rgba(255,255,255,.05)' }}>
-                      <p style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.6, margin: 0 }}>
-                        The Offline Brain (Gemma 3) allows you to process legal queries without an internet connection. 
-                        It is a compact yet powerful model optimized for legal reasoning.
+                      <p style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.6, margin: 0 }}>
+                        Nexus Justice uses Gemini 2.5 Flash-Live as the sole AI engine for all tasks including voice interactions, client calls, legal research, drafting, and translation. 
+                        It provides high-performance, low-latency legal assistance with built-in Google Search capabilities.
                       </p>
-                      {!aiStatus.ollamaReady && (
-                        <p style={{ fontSize: 9, color: '#64748b', marginTop: 12, borderTop: '1px solid rgba(255,255,255,.05)', paddingTop: 8 }}>
-                          <strong>Troubleshooting:</strong> If the brain won't install, ensure Ollama is running and set the environment variable <code>OLLAMA_ORIGINS="*"</code> on your computer.
-                        </p>
-                      )}
                     </div>
                   </div>
 
@@ -2004,11 +2199,21 @@ export default function AdvocatePortal() {
                         </div>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ fontSize: 12 }}>Cloud Sync</span>
-                        <div style={{ width: 32, height: 18, borderRadius: 9, background: '#1e293b', position: 'relative' }}>
-                          <div style={{ position: 'absolute', top: 2, left: 2, width: 14, height: 14, borderRadius: '50%', background: '#fff' }} />
+                        <span style={{ fontSize: 12 }}>Cloud Sync (Google Drive)</span>
+                        <div 
+                          onClick={() => setCloudSync(!cloudSync)}
+                          style={{ width: 32, height: 18, borderRadius: 9, background: cloudSync ? '#6366f1' : '#1e293b', position: 'relative', cursor: 'pointer', transition: 'all 0.3s' }}
+                        >
+                          <div style={{ position: 'absolute', top: 2, left: cloudSync ? 16 : 2, width: 14, height: 14, borderRadius: '50%', background: '#fff', transition: 'all 0.3s' }} />
                         </div>
                       </div>
+                      <button 
+                        onClick={restoreFromCloud}
+                        style={{ width: '100%', padding: '8px', borderRadius: 8, background: 'rgba(99,102,241,.1)', border: '1px solid rgba(99,102,241,.2)', color: '#6366f1', fontSize: 10, fontWeight: 900, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                      >
+                        <Download size={14} />
+                        Restore from Google Drive
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -2041,12 +2246,18 @@ export default function AdvocatePortal() {
 
             {/* CONSULT */}
             {view === 'consult' && (
-              <motion.div key="consult" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 24, gap: 12, overflow: 'hidden' }}>
+              <motion.div key="consult" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="h-full flex flex-col p-4 md:p-6 gap-3 overflow-hidden">
                 <div style={{ ...S.card, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                   <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 14 }}>
                     {chatHistory.map((msg, i) => (
                       <div key={i} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                        <div style={{ maxWidth: '80%', padding: '13px 17px', borderRadius: 20, background: msg.role === 'user' ? 'rgba(99,102,241,.15)' : 'rgba(255,255,255,.04)', border: `1px solid ${msg.role === 'user' ? 'rgba(99,102,241,.3)' : 'rgba(255,255,255,.07)'}`, fontSize: 13, lineHeight: 1.7, position: 'relative' }}>
+                        <div 
+                          className="max-w-[90%] md:max-w-[80%] p-[13px_17px] rounded-[20px] relative text-[13px] leading-[1.7]"
+                          style={{ 
+                            background: msg.role === 'user' ? 'rgba(99,102,241,.15)' : 'rgba(255,255,255,.04)', 
+                            border: `1px solid ${msg.role === 'user' ? 'rgba(99,102,241,.3)' : 'rgba(255,255,255,.07)'}` 
+                          }}
+                        >
                           <div className="markdown-body">
                             <ReactMarkdown>{msg.content}</ReactMarkdown>
                           </div>
@@ -2120,13 +2331,13 @@ export default function AdvocatePortal() {
 
             {/* CLIENTS */}
             {view === 'clients' && (
-              <motion.div key="clients" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', overflowY: 'auto', padding: 24 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                  <h2 style={{ fontSize: 32, fontWeight: 900, fontStyle: 'italic' }}>Client Registry</h2>
+              <motion.div key="clients" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="h-full overflow-y-auto p-4 md:p-6">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-5">
+                  <h2 className="text-2xl md:text-3xl font-black italic">Client Registry</h2>
                   <button onClick={() => setAddingClient(true)} style={{ padding: '11px 22px', background: 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.25)', borderRadius: 14, color: '#f59e0b', fontWeight: 900 }}>+ Add Client</button>
                 </div>
-                <div style={S.card}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <div style={S.card} className="overflow-x-auto">
+                  <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 600 }}>
                     <thead>
                       <tr style={{ borderBottom: '1px solid rgba(255,255,255,.08)' }}>
                         {['Client', 'Case No.', 'Court', 'Next Date'].map(h => <th key={h} style={{ padding: 12, textAlign: 'left', fontSize: 10, color: '#475569', textTransform: 'uppercase' }}>{h}</th>)}
@@ -2212,7 +2423,7 @@ export default function AdvocatePortal() {
                 {kbFilter !== 'drafts' && kbFilter !== 'scans' && (
                   <>
                     <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 16 }}>Legal Acts & References</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))', gap: 14, marginBottom: 40 }}>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-10">
                       {kbDocs.filter(d => kbFilter === 'all' || kbFilter === 'acts' || d.category === kbFilter).map(doc => (
                         <div key={doc.id} style={{ background: '#0a0f1d', borderRadius: 18, padding: 20, border: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', gap: 16 }}>
                           <div style={{ width: 40, height: 40, borderRadius: 10, background: 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6366f1' }}>
@@ -2231,7 +2442,7 @@ export default function AdvocatePortal() {
                 {(kbFilter === 'all' || kbFilter === 'drafts') && (
                   <>
                     <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 16 }}>Saved Drafts & Petitions</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(320px,1fr))', gap: 14, marginBottom: 40 }}>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-10">
                       {savedDrafts.length === 0 ? (
                         <div style={{ gridColumn: '1/-1', padding: 40, textAlign: 'center', background: 'rgba(255,255,255,.02)', borderRadius: 20, border: '1px dashed rgba(255,255,255,.05)' }}>
                           <FileText size={32} style={{ color: '#1e293b', margin: '0 auto 12px' }} />
@@ -2276,7 +2487,7 @@ export default function AdvocatePortal() {
                 {(kbFilter === 'all' || kbFilter === 'scans') && (
                   <>
                     <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 16 }}>Scanned Documents & Analysis</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(320px,1fr))', gap: 14 }}>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                       {scannedDocs.length === 0 ? (
                         <div style={{ gridColumn: '1/-1', padding: 40, textAlign: 'center', background: 'rgba(255,255,255,.02)', borderRadius: 20, border: '1px dashed rgba(255,255,255,.05)' }}>
                           <Camera size={32} style={{ color: '#1e293b', margin: '0 auto 12px' }} />
@@ -2371,9 +2582,12 @@ export default function AdvocatePortal() {
             {/* READING ROOM */}
             {view === 'reading-room' && (
               <motion.div key="reading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#070b14' }}>
-                <div style={{ flex: 1, display: 'flex', gap: 18, padding: 18 }}>
-                  <div style={{ width: 420, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div style={{ background: '#0a0f1d', borderRadius: 22, border: '1px solid rgba(255,255,255,.07)', overflow: 'hidden', position: 'relative', minHeight: 300 }}>
+                <div className="flex-1 flex flex-col md:flex-row gap-4 p-4 md:p-5 overflow-y-auto">
+                  <div className="w-full md:w-[420px] flex-shrink-0 flex flex-col gap-3">
+                    <div 
+                      className="min-h-[250px] md:min-h-[300px] overflow-hidden relative"
+                      style={{ background: '#0a0f1d', borderRadius: 22, border: '1px solid rgba(255,255,255,.07)' }}
+                    >
                       <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', display: scanPhase === 'live' ? 'block' : 'none' }} />
                       <canvas ref={canvasRef} style={{ display: 'none' }} />
                       {scanPhase === 'idle' && <div className="absolute inset-0 flex items-center justify-center text-slate-500">Camera is off</div>}
@@ -2516,7 +2730,7 @@ export default function AdvocatePortal() {
                         disabled={isConverting || !converterInputText}
                         style={{ padding: '12px 24px', background: '#6366f1', border: 'none', borderRadius: 12, color: '#fff', fontWeight: 900, fontSize: 12, cursor: 'pointer', opacity: (isConverting || !converterInputText) ? 0.5 : 1 }}
                       >
-                        {isConverting ? 'Translating...' : 'Translate (Sarvam)'}
+                        {isConverting ? 'Translating...' : 'Translate (Gemini)'}
                       </button>
                     </div>
 
@@ -2544,17 +2758,12 @@ export default function AdvocatePortal() {
 
             {/* WRITING DESK */}
             {view === 'writing-desk' && (
-              <motion.div key="writing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', display: 'flex', overflow: 'hidden', background: '#020617' }}>
+              <motion.div key="writing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="h-full flex flex-col md:flex-row overflow-hidden bg-[#020617]">
                 
                 {/* Column 1: Advocate Inputs */}
-                <div style={{ 
-                  width: maximizedColumn === 'inputs' ? '100%' : (maximizedColumn === 'none' ? 350 : 0), 
-                  display: (maximizedColumn === 'none' || maximizedColumn === 'inputs') ? 'flex' : 'none',
-                  borderRight: '1px solid rgba(255,255,255,.05)', 
-                  flexDirection: 'column', 
-                  background: '#070b14',
-                  transition: 'all 0.3s ease'
-                }}>
+                <div 
+                  className={`flex flex-col bg-[#070b14] transition-all duration-300 border-r border-white/5 ${maximizedColumn === 'inputs' ? 'w-full' : (maximizedColumn === 'none' ? 'w-full md:w-[350px]' : 'w-0 hidden')} ${maximizedColumn === 'none' ? 'max-h-[40vh] md:max-h-none' : 'h-auto'}`}
+                >
                   <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <Edit3 size={14} className="text-indigo-500" />
@@ -2570,20 +2779,6 @@ export default function AdvocatePortal() {
                   </div>
                   
                   <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 20 }}>
-                    {/* Temporary Writing Pad */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <label style={{ fontSize: 9, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Temporary Writing Pad</label>
-                        <button onClick={() => setWritingPad('')} style={{ fontSize: 8, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer' }}>Clear</button>
-                      </div>
-                      <textarea 
-                        value={writingPad} 
-                        onChange={e => setWritingPad(e.target.value)}
-                        placeholder="Free notes, quick points..."
-                        style={{ width: '100%', height: 120, background: 'rgba(255,255,255,.03)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 12, padding: 12, fontSize: 12, resize: 'none', lineHeight: 1.6 }}
-                      />
-                    </div>
-
                     {/* Facts of the Case */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -2601,18 +2796,18 @@ export default function AdvocatePortal() {
                       <textarea 
                         value={caseFacts} 
                         onChange={e => setCaseFacts(e.target.value)}
-                        placeholder="Describe the client's story/facts..."
-                        style={{ width: '100%', height: 180, background: 'rgba(255,255,255,.03)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 12, padding: 12, fontSize: 12, resize: 'none', lineHeight: 1.6 }}
+                        placeholder="Describe the client's story/facts. Gemini will guide you if anything is missing..."
+                        style={{ width: '100%', height: 250, background: 'rgba(255,255,255,.03)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 12, padding: 12, fontSize: 12, resize: 'none', lineHeight: 1.6 }}
                       />
                       <div style={{ display: 'flex', gap: 8 }}>
                         <button 
                           onClick={() => {
-                            setNotifications(prev => [{ id: Date.now(), message: "Facts saved to local session.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+                            setNotifications(prev => [{ id: Date.now(), message: "Facts analyzed by Gemini.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
                             getAiGuidance();
                           }}
                           style={{ flex: 1, padding: '8px', background: 'rgba(99,102,241,.1)', border: '1px solid rgba(99,102,241,.2)', borderRadius: 8, color: '#6366f1', fontSize: 10, fontWeight: 900, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
                         >
-                          <Save size={12} /> Save & Get Guidance
+                          <Brain size={12} /> Get AI Guidance
                         </button>
                       </div>
                     </div>
@@ -2632,6 +2827,30 @@ export default function AdvocatePortal() {
                         </div>
                       </div>
                     </div>
+
+                    {/* Saved Drafts Quick Access */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <label style={{ fontSize: 9, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Saved Drafts</label>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {savedDrafts.slice(0, 3).map(draft => (
+                          <button 
+                            key={draft.id}
+                            onClick={() => {
+                              setDraftPages([draft.content]);
+                              setCaseFacts(draft.case_facts || '');
+                              setWritingDeskPhase('final');
+                            }}
+                            style={{ padding: '10px', background: 'rgba(255,255,255,.02)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 10, textAlign: 'left', fontSize: 11, color: '#cbd5e1' }}
+                          >
+                            <div style={{ fontWeight: 700, marginBottom: 2 }}>{draft.title}</div>
+                            <div style={{ fontSize: 9, color: '#475569' }}>{new Date(draft.timestamp).toLocaleDateString()}</div>
+                          </button>
+                        ))}
+                        {savedDrafts.length === 0 && (
+                          <div style={{ fontSize: 10, color: '#475569', fontStyle: 'italic', padding: '10px', textAlign: 'center' }}>No saved drafts yet.</div>
+                        )}
+                      </div>
+                    </div>
                   </div>
 
                   <div style={{ padding: 16, borderTop: '1px solid rgba(255,255,255,.05)' }}>
@@ -2641,45 +2860,41 @@ export default function AdvocatePortal() {
                       style={{ width: '100%', padding: '14px', background: '#f59e0b', border: 'none', borderRadius: 12, color: '#000', fontWeight: 900, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, opacity: deskLoading ? 0.5 : 1 }}
                     >
                       {deskLoading ? <RotateCcw size={16} className="spin" /> : <Zap size={16} />}
-                      Generate Draft (Sarvam)
+                      Generate Draft (Gemini)
                     </button>
                   </div>
                 </div>
 
                 {/* Column 2: Draft Editor */}
-                <div style={{ 
-                  flex: 1, 
-                  display: (maximizedColumn === 'none' || maximizedColumn === 'editor') ? 'flex' : 'none', 
-                  flexDirection: 'column', 
-                  borderRight: '1px solid rgba(255,255,255,.05)',
-                  transition: 'all 0.3s ease'
-                }}>
+                <div 
+                  className={`flex flex-col border-r border-white/5 transition-all duration-300 ${maximizedColumn === 'editor' ? 'w-full' : (maximizedColumn === 'none' ? 'flex-1' : 'w-0 hidden')} ${maximizedColumn === 'none' ? 'min-h-[50vh] md:min-h-0' : 'h-auto'}`}
+                >
                   <div style={{ height: 48, background: '#0a0f1d', borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <FileText size={14} className="text-indigo-500" />
                       <span style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase' }}>Legal Draft Editor</span>
                     </div>
-                    <div style={{ display: 'flex', gap: 8 }}>
+                    <div className="flex gap-2 overflow-x-auto no-scrollbar">
                       <button 
                         onClick={() => setMaximizedColumn(maximizedColumn === 'editor' ? 'none' : 'editor')}
-                        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, color: '#cbd5e1', fontSize: 10, fontWeight: 900 }}
+                        className="hidden md:flex items-center gap-1.5 p-1.5 px-3 bg-white/5 border border-white/10 rounded-lg text-slate-300 text-[10px] font-black"
                         title={maximizedColumn === 'editor' ? "Minimize" : "Enlarge"}
                       >
                         {maximizedColumn === 'editor' ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
                         {maximizedColumn === 'editor' ? 'Minimize' : 'Enlarge'}
                       </button>
-                      <button onClick={handleDownloadDraft} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, color: '#cbd5e1', fontSize: 10, fontWeight: 900 }}>
+                      <button onClick={handleDownloadDraft} className="flex items-center gap-1.5 p-1.5 px-3 bg-white/5 border border-white/10 rounded-lg text-slate-300 text-[10px] font-black">
                         <Download size={12} /> Download
                       </button>
-                      <button onClick={saveDraftToDb} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 8, color: '#10b981', fontSize: 10, fontWeight: 900 }}>
-                        <Save size={12} /> Save to DB
+                      <button onClick={saveDraftToDb} className="flex items-center gap-1.5 p-1.5 px-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-500 text-[10px] font-black">
+                        <Save size={12} /> Save
                       </button>
-                      <button onClick={() => setDraftEditMode(!draftEditMode)} style={{ padding: '6px 12px', background: draftEditMode ? '#f59e0b' : 'rgba(245,158,11,.1)', border: '1px solid rgba(245,158,11,.2)', borderRadius: 8, color: draftEditMode ? '#000' : '#f59e0b', fontSize: 10, fontWeight: 900 }}>
+                      <button onClick={() => setDraftEditMode(!draftEditMode)} className={`p-1.5 px-3 border rounded-lg text-[10px] font-black ${draftEditMode ? 'bg-amber-500 text-black border-amber-500' : 'bg-amber-500/10 text-amber-500 border-amber-500/20'}`}>
                         {draftEditMode ? 'Save' : 'Edit'}
                       </button>
                     </div>
                   </div>
-                  <div style={{ flex: 1, background: '#0d1117', padding: 40, overflowY: 'auto', position: 'relative' }}>
+                  <div className="flex-1 bg-[#0d1117] p-6 md:p-10 overflow-y-auto relative">
                     {draftEditMode ? (
                       <textarea 
                         value={draftPages[0]}
@@ -2695,13 +2910,9 @@ export default function AdvocatePortal() {
                 </div>
 
                 {/* Column 3: AI Assistant */}
-                <div style={{ 
-                  width: maximizedColumn === 'assistant' ? '100%' : (maximizedColumn === 'none' ? 320 : 0), 
-                  display: (maximizedColumn === 'none' || maximizedColumn === 'assistant') ? 'flex' : 'none',
-                  background: '#070b14', 
-                  flexDirection: 'column',
-                  transition: 'all 0.3s ease'
-                }}>
+                <div 
+                  className={`flex flex-col bg-[#070b14] transition-all duration-300 ${maximizedColumn === 'assistant' ? 'w-full' : (maximizedColumn === 'none' ? 'w-full md:w-[320px]' : 'w-0 hidden')} ${maximizedColumn === 'none' ? 'max-h-[40vh] md:max-h-none' : 'h-auto'}`}
+                >
                   <div style={{ padding: 16, borderBottom: '1px solid rgba(255,255,255,.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <Zap size={14} className="text-indigo-500" />
@@ -2730,21 +2941,79 @@ export default function AdvocatePortal() {
                       </div>
                     )}
 
-                    {/* Suggestions (Gemini) */}
-                    {aiSuggestions.length > 0 && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        <div style={{ fontSize: 9, fontWeight: 900, color: '#f59e0b', textTransform: 'uppercase' }}>Draft Suggestions</div>
-                        {aiSuggestions.map((s, i) => (
-                          <div key={i} style={{ padding: 12, background: 'rgba(245,158,11,.05)', border: '1px solid rgba(245,158,11,.1)', borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                            <div style={{ fontSize: 11, color: '#cbd5e1', lineHeight: 1.5 }}>{s}</div>
-                            <button 
-                              onClick={() => integrateSuggestion(s)}
-                              style={{ alignSelf: 'flex-end', padding: '4px 8px', background: 'rgba(245,158,11,.2)', border: 'none', borderRadius: 6, color: '#f59e0b', fontSize: 9, fontWeight: 900, cursor: 'pointer' }}
-                            >
-                              Approve & Integrate
-                            </button>
-                          </div>
-                        ))}
+                    {/* Suggestions Dropdown */}
+                    {showSuggestionsDropdown && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, background: 'rgba(245,158,11,.05)', border: '1px solid rgba(245,158,11,.1)', borderRadius: 16, padding: 16 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                          <div style={{ fontSize: 9, fontWeight: 900, color: '#f59e0b', textTransform: 'uppercase' }}>AI Suggestions</div>
+                          <button onClick={() => { setShowSuggestionsDropdown(false); getRelatedCases(); }} style={{ fontSize: 9, color: '#f59e0b', fontWeight: 900, background: 'none', border: 'none', cursor: 'pointer' }}>Done</button>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {aiSuggestionsList.map((s, i) => (
+                            <div key={i} onClick={() => {
+                              const newList = [...aiSuggestionsList];
+                              newList[i].selected = !newList[i].selected;
+                              setAiSuggestionsList(newList);
+                            }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: s.selected ? 'rgba(245,158,11,.1)' : 'rgba(255,255,255,.02)', borderRadius: 10, cursor: 'pointer', transition: 'all .2s' }}>
+                              <div style={{ width: 16, height: 16, borderRadius: 4, border: '1px solid rgba(245,158,11,.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', background: s.selected ? '#f59e0b' : 'transparent' }}>
+                                {s.selected && <Check size={12} color="#000" />}
+                              </div>
+                              <div style={{ fontSize: 11, color: s.selected ? '#fff' : '#94a3b8' }}>{s.text}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Related Cases Dropdown */}
+                    {showCasesDropdown && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, background: 'rgba(16,185,129,.05)', border: '1px solid rgba(16,185,129,.1)', borderRadius: 16, padding: 16 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                          <div style={{ fontSize: 9, fontWeight: 900, color: '#10b981', textTransform: 'uppercase' }}>Related Case Citations</div>
+                          <button onClick={() => { setShowCasesDropdown(false); recreateDraft(); }} style={{ fontSize: 9, color: '#10b981', fontWeight: 900, background: 'none', border: 'none', cursor: 'pointer' }}>Recreate Draft</button>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                          {relatedCasesList.map((c, i) => (
+                            <div key={i} style={{ padding: 12, background: 'rgba(255,255,255,.02)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                              <div onClick={() => {
+                                const newList = [...relatedCasesList];
+                                newList[i].selected = !newList[i].selected;
+                                setRelatedCasesList(newList);
+                              }} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+                                <div style={{ width: 16, height: 16, borderRadius: 4, border: '1px solid rgba(16,185,129,.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', background: c.selected ? '#10b981' : 'transparent' }}>
+                                  {c.selected && <Check size={12} color="#000" />}
+                                </div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: '#fff' }}>{c.citation}</div>
+                              </div>
+                              <div style={{ fontSize: 10, color: '#94a3b8', lineHeight: 1.4 }}>{c.description}</div>
+                              
+                              {c.selected && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid rgba(255,255,255,.05)', paddingTop: 8 }}>
+                                  <input 
+                                    placeholder="Where does this fit? (e.g. Paragraph 4)" 
+                                    value={c.placement}
+                                    onChange={e => {
+                                      const newList = [...relatedCasesList];
+                                      newList[i].placement = e.target.value;
+                                      setRelatedCasesList(newList);
+                                    }}
+                                    style={{ background: 'rgba(0,0,0,.2)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 6, padding: '6px 10px', fontSize: 10, color: '#fff' }}
+                                  />
+                                  <textarea 
+                                    placeholder="Reason for inclusion..." 
+                                    value={c.reason}
+                                    onChange={e => {
+                                      const newList = [...relatedCasesList];
+                                      newList[i].reason = e.target.value;
+                                      setRelatedCasesList(newList);
+                                    }}
+                                    style={{ background: 'rgba(0,0,0,.2)', border: '1px solid rgba(255,255,255,.05)', borderRadius: 6, padding: '6px 10px', fontSize: 10, color: '#fff', height: 60, resize: 'none' }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
 
@@ -2933,7 +3202,7 @@ export default function AdvocatePortal() {
                   )}
                 <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
-                    Engine: {activeEngine || (isOffline || aiStatus.offlineBrain ? 'Gemma 3' : aiStatus.builtIn ? 'Gemini Nano' : 'Gemini 3 Flash')}
+                    Engine: {activeEngine || (isOffline ? 'None' : 'Gemini 2.5 Flash')}
                   </span>
                   {(voiceAiReply || voiceAiThinking) && (
                     <button onClick={resetVoiceAi} style={{ fontSize: 8, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase', background: 'none', border: 'none', cursor: 'pointer' }}>
@@ -2980,142 +3249,27 @@ export default function AdvocatePortal() {
                 initial={{ scale: 0.9, opacity: 0, y: 20 }} 
                 animate={{ scale: 1, opacity: 1, y: 0 }} 
                 exit={{ scale: 1.1, opacity: 0, y: -20 }}
-                className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full text-center"
+                className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full text-center shadow-2xl shadow-black/50"
               >
                 <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center mb-8 mx-auto shadow-2xl shadow-indigo-500/20">
                   <Shield size={40} className="text-white" />
                 </div>
-                <h2 className="text-4xl font-black italic tracking-tighter mb-4">Nexus <span className="text-indigo-500">Justice</span></h2>
-                <p className="text-slate-400 mb-8 leading-relaxed">The ultimate hybrid AI workspace for advocates. Secure, offline-first, and powerful.</p>
+                <h2 className="text-4xl font-black italic tracking-tighter mb-2">Nexus <span className="text-indigo-500">Justice</span></h2>
+                <p className="text-slate-500 mb-10 text-sm uppercase tracking-widest font-bold">Advocate Portal Login</p>
                 
-                <button 
-                  onClick={() => {
-                    setOnboardingStep(2);
-                    confetti({
-                      particleCount: 150,
-                      spread: 70,
-                      origin: { y: 0.6 },
-                      colors: ['#6366f1', '#a855f7', '#ec4899']
-                    });
-                  }} 
-                  className="w-full py-5 bg-white text-black hover:bg-slate-200 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 transition-all active:scale-95"
-                >
-                  <Icon path="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" size={20} />
-                  Login with Google
-                </button>
-              </motion.div>
-            )}
-
-            {onboardingStep === 2 && (
-              <motion.div 
-                key="step2"
-                initial={{ scale: 0.9, opacity: 0, y: 20 }} 
-                animate={{ scale: 1, opacity: 1, y: 0 }} 
-                exit={{ scale: 1.1, opacity: 0, y: -20 }}
-                className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full text-center"
-              >
-                <div className="w-20 h-20 bg-emerald-500 rounded-3xl flex items-center justify-center mb-8 mx-auto shadow-2xl shadow-emerald-500/20">
-                  <Zap size={40} className="text-white" />
-                </div>
-                <h2 className="text-4xl font-black italic tracking-tighter mb-4">Login <span className="text-emerald-500">Successful!</span></h2>
-                <p className="text-slate-400 mb-8 leading-relaxed">Now, let's supercharge your experience. Connect your Gemini API key to enable unlimited cloud-scale legal research.</p>
-                
-                <div className="p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl mb-8 text-left">
-                  <div className="flex items-center gap-3 text-indigo-400 font-bold mb-2">
-                    <Info size={16} />
-                    <span className="text-sm uppercase tracking-wider">Why BYOK?</span>
-                  </div>
-                  <p className="text-xs text-slate-400 leading-relaxed">By using your own key, you get higher rate limits and direct access to the latest Gemini models without any platform restrictions.</p>
-                </div>
-
-                <button 
-                  onClick={() => setOnboardingStep(3)} 
-                  className="w-full py-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-black uppercase tracking-widest transition-all active:scale-95"
-                >
-                  Connect to Google AI Studio
-                </button>
-              </motion.div>
-            )}
-
-            {onboardingStep === 3 && (
-              <motion.div 
-                key="step3"
-                initial={{ scale: 0.9, opacity: 0, y: 20 }} 
-                animate={{ scale: 1, opacity: 1, y: 0 }} 
-                exit={{ scale: 1.1, opacity: 0, y: -20 }}
-                className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full"
-              >
-                <div className="flex items-center justify-between mb-8">
-                  <h2 className="text-2xl font-black italic tracking-tighter">Generate <span className="text-indigo-500">API Key</span></h2>
-                  <div className="px-3 py-1 bg-white/5 rounded-full text-[10px] font-bold text-slate-500 uppercase tracking-widest border border-white/5">Step 3 of 4</div>
-                </div>
-
-                <div className="space-y-6 mb-8">
-                  <div className="flex gap-4">
-                    <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center text-indigo-400 font-black shrink-0">1</div>
-                    <p className="text-sm text-slate-400">Click the button below to open Google AI Studio's API key page.</p>
-                  </div>
-                  <div className="flex gap-4">
-                    <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center text-indigo-400 font-black shrink-0">2</div>
-                    <p className="text-sm text-slate-400">Click <strong className="text-white">"Create API key in new project"</strong> and copy the key.</p>
-                  </div>
-                  <div className="flex gap-4">
-                    <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center text-indigo-400 font-black shrink-0">3</div>
-                    <p className="text-sm text-slate-400">Return here. We'll attempt to <strong className="text-white">grab it automatically</strong> from your clipboard.</p>
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                  <a 
-                    href="https://aistudio.google.com/app/apikey" 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-2xl font-bold flex items-center justify-center gap-3 transition-all"
-                  >
-                    <ExternalLink size={18} />
-                    Open Google AI Studio
-                  </a>
-
-                  <div className="relative">
-                    <input 
-                      type="password" 
-                      placeholder="Paste API Key here (or we'll grab it)..."
-                      value={userApiKey}
-                      onChange={(e) => setUserApiKey(e.target.value)}
-                      className="w-full py-4 px-6 bg-black/40 border border-white/10 rounded-2xl text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 transition-all font-mono text-sm"
-                    />
-                    {userApiKey.startsWith("AIzaSy") && (
-                      <div className="absolute right-4 top-1/2 -translate-y-1/2 text-emerald-500">
-                        <CheckCircle size={20} />
-                      </div>
-                    )}
-                  </div>
-
+                <div className="space-y-4 mb-10">
                   <button 
-                    disabled={!userApiKey.startsWith("AIzaSy") || isKeyValidating}
-                    onClick={async () => {
-                      setIsKeyValidating(true);
-                      try {
-                        // Save to DB and Engine
-                        aiEngine.setApiKey(userApiKey);
-                        setOnboardingStep(4);
-                        confetti({
-                          particleCount: 200,
-                          spread: 100,
-                          origin: { y: 0.5 },
-                          colors: ['#10b981', '#34d399', '#6ee7b7']
-                        });
-                      } catch (e) {
-                        console.error(e);
-                      } finally {
-                        setIsKeyValidating(false);
-                      }
-                    }} 
-                    className={`w-full py-5 rounded-2xl font-black uppercase tracking-widest transition-all ${userApiKey.startsWith("AIzaSy") ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-xl shadow-indigo-500/20' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}
+                    onClick={handleGoogleLogin} 
+                    className="w-full py-5 bg-white text-black hover:bg-slate-200 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 transition-all active:scale-95 shadow-lg"
                   >
-                    {isKeyValidating ? 'Validating...' : 'Securely Save Key'}
+                    <Icon path="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" size={20} />
+                    Connect Google Account
                   </button>
                 </div>
+                
+                <p className="text-[10px] text-slate-600 uppercase tracking-widest font-bold">
+                  Nexus uses your own Google account to provide AI capabilities.
+                </p>
               </motion.div>
             )}
 
@@ -3124,30 +3278,117 @@ export default function AdvocatePortal() {
                 key="step4"
                 initial={{ scale: 0.9, opacity: 0, y: 20 }} 
                 animate={{ scale: 1, opacity: 1, y: 0 }} 
-                exit={{ scale: 1.1, opacity: 0, y: -20 }}
                 className="bg-slate-900 border border-white/10 rounded-[40px] p-10 max-w-xl w-full text-center"
               >
-                <div className="w-24 h-24 bg-indigo-600 rounded-full flex items-center justify-center mb-8 mx-auto shadow-2xl shadow-indigo-500/40 relative">
-                  <Check size={60} className="text-white" />
-                  <motion.div 
-                    animate={{ scale: [1, 1.5, 1], opacity: [0.5, 0, 0.5] }} 
-                    transition={{ repeat: Infinity, duration: 2 }}
-                    className="absolute inset-0 bg-indigo-500 rounded-full"
-                  />
+                <div className="w-20 h-20 bg-emerald-500 rounded-3xl flex items-center justify-center mb-8 mx-auto shadow-2xl shadow-emerald-500/20">
+                  <CheckCircle size={40} className="text-white" />
                 </div>
-                <h2 className="text-4xl font-black italic tracking-tighter mb-4">Now <span className="text-indigo-500">Ready!</span></h2>
-                <p className="text-slate-400 mb-10 leading-relaxed">Your Gemini API key is securely stored in your local encrypted database. You're ready to use the full power of Nexus Justice.</p>
+                <h2 className="text-4xl font-black italic tracking-tighter mb-4">You're <span className="text-emerald-500">All Set!</span></h2>
+                <p className="text-slate-400 mb-8 leading-relaxed">
+                  Nexus Justice is now connected to your Google AI engine.<br/>
+                  Your legal database is ready for secure orchestration.
+                </p>
                 
                 <button 
-                  onClick={() => { 
-                    localStorage.setItem('onboarding_complete', 'true'); 
-                    setShowOnboarding(false); 
-                    setView('command');
-                  }} 
-                  className="w-full py-5 bg-white text-black hover:bg-slate-200 rounded-2xl font-black uppercase tracking-widest transition-all active:scale-95"
+                  onClick={() => {
+                    setShowOnboarding(false);
+                    localStorage.setItem('onboarding_complete', 'true');
+                  }}
+                  className="w-full py-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-black uppercase tracking-widest transition-all active:scale-95 shadow-xl shadow-indigo-500/20"
                 >
-                  Go to Command Page
+                  Enter Command Center
                 </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Tutorial Modal */}
+          <AnimatePresence>
+            {showTutorial && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/90 backdrop-blur-xl"
+              >
+                <motion.div 
+                  initial={{ scale: 0.9, y: 20 }}
+                  animate={{ scale: 1, y: 0 }}
+                  exit={{ scale: 0.9, y: 20 }}
+                  className="bg-slate-900 border border-white/10 rounded-[40px] max-w-4xl w-full overflow-hidden shadow-2xl"
+                >
+                  <div className="p-6 border-b border-white/5 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-indigo-500 rounded-xl flex items-center justify-center">
+                        <Play size={20} className="text-white fill-white ml-0.5" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl font-black italic tracking-tighter">Setup <span className="text-indigo-500">Tutorial</span></h3>
+                        <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">How to get your Gemini API Key</p>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => setShowTutorial(false)}
+                      className="w-10 h-10 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center transition-colors"
+                    >
+                      <X size={20} className="text-slate-400" />
+                    </button>
+                  </div>
+                  
+                  <div className="min-h-[400px] bg-black relative overflow-y-auto">
+                    {/* Tutorial Content - Using a stylized layout */}
+                    <div className="flex flex-col items-center justify-center p-6 md:p-12 text-center">
+                      <div className="w-full max-w-2xl space-y-6 md:space-y-8">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4">
+                          {[
+                            { step: 1, title: "Open Studio", desc: "Click the button to open Google AI Studio" },
+                            { step: 2, title: "Create Key", desc: "Click 'Create API key' in the sidebar" },
+                            { step: 3, title: "Copy & Paste", desc: "Copy the key and return here to paste" }
+                          ].map((s) => (
+                            <div key={s.step} className="p-3 md:p-4 bg-white/5 border border-white/10 rounded-2xl flex md:flex-col items-center gap-4 md:gap-0">
+                              <div className="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center text-xs font-black md:mb-3 flex-shrink-0">{s.step}</div>
+                              <div className="text-left md:text-center">
+                                <h4 className="text-sm font-bold text-white mb-0.5 md:mb-1">{s.title}</h4>
+                                <p className="text-[10px] text-slate-500 leading-tight">{s.desc}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        
+                        <div className="relative p-1 bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-2xl overflow-hidden shadow-2xl shadow-indigo-500/20">
+                          <div className="bg-slate-950 rounded-xl p-4 md:p-6 flex flex-col md:flex-row items-center justify-between gap-4">
+                            <div className="flex items-center gap-3 md:gap-4">
+                              <div className="w-10 h-10 md:w-12 md:h-12 bg-white/5 rounded-xl border border-white/10 flex items-center justify-center">
+                                <Copy size={20} className="text-indigo-400 md:hidden" />
+                                <Copy size={24} className="text-indigo-400 hidden md:block" />
+                              </div>
+                              <div className="text-left">
+                                <div className="text-[8px] md:text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-0.5 md:mb-1">Your Key</div>
+                                <div className="text-sm md:text-lg font-mono text-white tracking-widest">AIzaSy...XXXXX</div>
+                              </div>
+                            </div>
+                            <div className="w-full md:w-auto px-6 py-2 bg-indigo-600 rounded-lg text-[10px] md:text-xs font-black uppercase tracking-widest text-center">Copied!</div>
+                          </div>
+                        </div>
+
+                        <p className="text-sm text-slate-400 italic">"The process is simple and secure. Your key stays on your device."</p>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="p-6 md:p-8 bg-slate-950/50 flex flex-col md:flex-row items-center justify-between gap-6">
+                    <div className="flex items-center gap-3 md:gap-4 text-slate-400">
+                      <Info size={16} className="text-indigo-400 flex-shrink-0" />
+                      <p className="text-[10px] md:text-xs">Need more help? Visit the <a href="https://ai.google.dev/gemini-api/docs/api-key" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">official documentation</a>.</p>
+                    </div>
+                    <button 
+                      onClick={() => setShowTutorial(false)}
+                      className="w-full md:w-auto px-8 py-3 bg-white text-slate-900 rounded-xl font-black uppercase tracking-widest text-[10px] md:text-xs hover:bg-slate-200 transition-colors"
+                    >
+                      Got it, thanks!
+                    </button>
+                  </div>
+                </motion.div>
               </motion.div>
             )}
           </AnimatePresence>

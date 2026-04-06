@@ -12,11 +12,12 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@google/genai": "^1.29.0",
+    "@google/genai": "^1.48.0",
     "@huggingface/transformers": "^3.8.1",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "axios": "^1.7.9",
+    "better-sqlite3": "^12.8.0",
     "canvas-confetti": "^1.9.4",
     "cookie-session": "^2.1.0",
     "cors": "^2.8.5",
@@ -24,7 +25,8 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "file-saver": "^2.0.5",
-    "google-auth-library": "^9.15.0",
+    "firebase": "^12.11.0",
+    "google-auth-library": "^9.15.1",
     "googleapis": "^144.0.0",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.546.0",

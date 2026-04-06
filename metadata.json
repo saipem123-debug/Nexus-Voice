@@ -1,6 +1,6 @@
 {
-  "name": "Nexus Justice Hybrid",
-  "description": "Hybrid Legal Portal with On-Device Gemma 3 and Backend Sarvam 30B",
+  "name": "Nexus Justice",
+  "description": "Advanced Legal Portal powered by Gemini 2.5 Flash-Live with integrated Google Search for legal research and drafting.",
   "requestFramePermissions": [
     "camera",
     "microphone"
