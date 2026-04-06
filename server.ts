@@ -82,7 +82,8 @@ async function startServer() {
       scope: [
         'openid',
         'email',
-        'profile'
+        'profile',
+        'https://www.googleapis.com/auth/generative-language'
       ]
     });
     res.json({ url });
