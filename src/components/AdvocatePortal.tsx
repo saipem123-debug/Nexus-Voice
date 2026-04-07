@@ -116,6 +116,10 @@ export default function AdvocatePortal() {
         setAiStatus(response.data);
         
         const onboardingComplete = localStorage.getItem('onboarding_complete') === 'true';
+        const localKey = localStorage.getItem('nexus_gemini_api_key');
+        const isConfigured = response.data.geminiConfigured || (localKey && localKey !== 'true' && localKey.length > 20);
+        
+        console.log("Nexus Auth Check:", { isLoggedIn: response.data.isLoggedIn, onboardingComplete, isConfigured });
         
         if (response.data.isLoggedIn) {
           setUser({
@@ -123,8 +127,6 @@ export default function AdvocatePortal() {
             email: 'user@nexus.justice',
             photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
           });
-          
-          const isConfigured = response.data.geminiConfigured || !!localStorage.getItem('nexus_gemini_api_key');
           
           if (onboardingComplete && isConfigured) {
             setShowOnboarding(false);
@@ -186,17 +188,29 @@ export default function AdvocatePortal() {
       window.addEventListener('message', handleMessage);
     } catch (error: any) {
       console.error("Login failed:", error);
-      const errorMsg = error.response?.data?.error || error.message || "Unknown error";
+      const rawError = error.response?.data?.error;
+      let errorMsg = "Unknown error";
+      
+      if (typeof rawError === 'string') {
+        errorMsg = rawError;
+      } else if (rawError && typeof rawError === 'object') {
+        errorMsg = rawError.message || JSON.stringify(rawError);
+      } else if (error.message) {
+        errorMsg = error.message;
+      }
+      
       setLoginError(errorMsg);
       speak(`Connection failed: ${errorMsg}. Please try again.`);
     }
   };
 
   useEffect(() => {
-    if (onboardingStep === 2) {
+    if (onboardingStep === 1 && !isLoggedIn) {
+      speak("Welcome to Nexus Justice. Please connect your Google account to begin your secure legal orchestration.");
+    } else if (onboardingStep === 2) {
       speak("Authentication success. Now, we need to connect to your brain. Please follow the instructions to create your Gemini API key. Click the Create API key button, copy the generated key, then return here and paste it into the field below. Finally, click Connect to Brain.");
     }
-  }, [onboardingStep]);
+  }, [onboardingStep, isLoggedIn]);
 
   const handleConnectToBrain = async () => {
     if (!userApiKey.trim()) {
@@ -1851,6 +1865,17 @@ export default function AdvocatePortal() {
     return () => {};
   }, [aiStatus.ollamaReady, aiStatus.offlineBrain]);
 
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <RefreshCw size={40} className="text-indigo-500 animate-spin" />
+          <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px]">Initializing Nexus Justice...</p>
+        </div>
+      </div>
+    );
+  }
+
   // --- Sidebar & Tab Config ---
   const sideNav = [
     { id: 'command', label: 'Command', icon: "M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" },
@@ -1868,7 +1893,7 @@ export default function AdvocatePortal() {
   ];
 
   const S = {
-    page: { display: 'flex', height: '100vh', background: '#020617', color: '#e2e8f0', fontFamily: "'Inter', system-ui, sans-serif", overflow: 'hidden', fontSize: 14 },
+    page: { position: 'relative' as const, display: 'flex', height: '100vh', background: '#020617', color: '#e2e8f0', fontFamily: "'Inter', system-ui, sans-serif", overflow: 'hidden', fontSize: 14 },
     sidebar: { width: 72, background: '#070b14', borderRight: '1px solid rgba(255,255,255,.05)', display: 'none', flexDirection: 'column' as const, alignItems: 'center', padding: '20px 0', gap: 8, flexShrink: 0, overflowY: 'auto' as const },
     sidebarDesktop: { width: 72, background: '#070b14', borderRight: '1px solid rgba(255,255,255,.05)', display: 'flex', flexDirection: 'column' as const, alignItems: 'center', padding: '20px 0', gap: 8, flexShrink: 0, overflowY: 'auto' as const },
     sideBtn: (active: boolean) => ({ width: 44, height: 44, borderRadius: 12, background: active ? 'rgba(245,158,11,.1)' : 'transparent', border: active ? '1px solid rgba(245,158,11,.25)' : '1px solid transparent', color: active ? '#f59e0b' : '#475569', cursor: 'pointer', display: 'flex' as const, alignItems: 'center', justifyContent: 'center', position: 'relative' as const, transition: 'all .2s', flexShrink: 0 }),
@@ -2225,6 +2250,17 @@ export default function AdvocatePortal() {
                       >
                         <RotateCcw size={16} />
                         Logout from Nexus Justice
+                      </button>
+
+                      <button 
+                        onClick={() => {
+                          localStorage.clear();
+                          window.location.reload();
+                        }}
+                        style={{ width: '100%', padding: '12px', borderRadius: 12, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', color: '#64748b', fontSize: 10, fontWeight: 900, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                      >
+                        <RefreshCw size={14} />
+                        Reset App & Onboarding
                       </button>
                     </div>
                   </div>
