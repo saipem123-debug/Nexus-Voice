@@ -121,7 +121,16 @@ export default function AdvocatePortal() {
             email: 'user@nexus.justice',
             photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
           });
-          setOnboardingStep(4); // Skip to ready
+          
+          // Check if Gemini is already configured (either via backend or local storage)
+          const localKey = localStorage.getItem('nexus_sqlite_db'); // This is just a check for DB existence
+          const isConfigured = response.data.geminiConfigured || !!localStorage.getItem('nexus_gemini_api_key');
+          
+          if (isConfigured) {
+            setOnboardingStep(4); // Skip to ready
+          } else {
+            setOnboardingStep(2); // Go to BYOK
+          }
           setShowOnboarding(true);
         } else {
           setShowOnboarding(true);
@@ -162,7 +171,7 @@ export default function AdvocatePortal() {
             photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
           });
           speak("Google account connected successfully. Welcome to Nexus Justice.");
-          setOnboardingStep(4);
+          setOnboardingStep(2);
           // Refresh AI engine
           await aiEngine.updateStatus(true);
         }
@@ -176,6 +185,59 @@ export default function AdvocatePortal() {
       speak(`Connection failed: ${errorMsg}. Please try again.`);
     }
   };
+
+  useEffect(() => {
+    if (onboardingStep === 2) {
+      speak("Authentication success. Now, we need to connect to your brain. Please follow the instructions to create your Gemini API key. Click the Create API key button, copy the generated key, then return here and paste it into the field below. Finally, click Connect to Brain.");
+    }
+  }, [onboardingStep]);
+
+  const handleConnectToBrain = async () => {
+    if (!userApiKey.trim()) {
+      speak("Please paste your API key first.");
+      return;
+    }
+    setIsKeyValidating(true);
+    try {
+      // Set the key in the AI engine
+      aiEngine.setApiKey(userApiKey.trim());
+      
+      // Store the key locally
+      localStorage.setItem('nexus_gemini_api_key', userApiKey.trim());
+      localStorage.setItem('onboarding_complete', 'true');
+      
+      // The user's specific success message
+      speak("the key sucessfully copied now you can do your legal works");
+      
+      // Trigger confetti for success
+      confetti({
+        particleCount: 150,
+        spread: 70,
+        origin: { y: 0.6 },
+        colors: ['#6366f1', '#10b981', '#f43f5e']
+      });
+
+      // Automatically transition to the command center after a short delay
+      setTimeout(() => {
+        setShowOnboarding(false);
+        setOnboardingStep(4);
+        setView('command');
+      }, 2500);
+      
+    } catch (error) {
+      console.error("Key validation failed:", error);
+      speak("Failed to connect to brain. Please check your API key.");
+    } finally {
+      setIsKeyValidating(false);
+    }
+  };
+
+  // Auto-detect API key paste for a seamless experience
+  useEffect(() => {
+    if (onboardingStep === 2 && userApiKey.trim().length > 35 && userApiKey.startsWith('AIza')) {
+      handleConnectToBrain();
+    }
+  }, [userApiKey, onboardingStep]);
 
   const handleLogout = async () => {
     try {
@@ -679,6 +741,11 @@ export default function AdvocatePortal() {
         const savedScansFromDb = localDB.query("SELECT * FROM scanned_docs ORDER BY timestamp DESC") as any[];
         if (savedScansFromDb.length > 0) {
           setScannedDocs(savedScansFromDb);
+        }
+
+        const config = localDB.query("SELECT value FROM config WHERE key = 'gemini_api_key'");
+        if (config.length > 0 && config[0].value) {
+          localStorage.setItem('nexus_gemini_api_key', 'true');
         }
       } catch (err) {
         console.error("Database initialization failed:", err);
@@ -3274,6 +3341,188 @@ export default function AdvocatePortal() {
               </motion.div>
             )}
 
+            {onboardingStep === 2 && (
+              <motion.div 
+                key="step2"
+                initial={{ scale: 0.9, opacity: 0, y: 20 }} 
+                animate={{ scale: 1, opacity: 1, y: 0 }} 
+                exit={{ scale: 1.1, opacity: 0, y: -20 }}
+                className="bg-slate-900 border border-white/10 rounded-[40px] p-8 max-w-2xl w-full shadow-2xl shadow-black/50"
+              >
+                <div className="flex items-center gap-4 mb-8">
+                  <div className="w-14 h-14 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                    <Brain size={28} className="text-white" />
+                  </div>
+                  <div className="text-left">
+                    <h2 className="text-2xl font-black italic tracking-tighter">Connect to <span className="text-indigo-500">Brain</span></h2>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">Bring Your Own Key (BYOK)</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-3 text-left">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="w-6 h-6 bg-indigo-500/20 rounded-full flex items-center justify-center text-indigo-400 font-black text-[9px]">1</div>
+                      <h3 className="text-[9px] font-black uppercase tracking-widest text-slate-300">Create Key</h3>
+                    </div>
+                    <div className="aspect-video bg-[#f8f9fa] rounded-lg border border-white/5 overflow-hidden relative group scale-95">
+                      {/* Mock Google AI Studio UI */}
+                      <div className="p-2 h-full flex flex-col">
+                        <div className="flex items-center gap-1 mb-2 border-b border-gray-200 pb-1">
+                          <div className="w-2 h-2 bg-gray-300 rounded-sm"></div>
+                          <div className="h-1.5 w-12 bg-gray-200 rounded"></div>
+                        </div>
+                        <div className="flex justify-between items-center mb-2">
+                          <h4 className="text-[10px] font-bold text-gray-800">API Keys</h4>
+                          <div className="px-1.5 py-0.5 bg-white border border-gray-300 rounded text-[6px] text-gray-700 shadow-sm">
+                            Create API key
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="h-4 w-full bg-gray-100 rounded border border-gray-200"></div>
+                        </div>
+                      </div>
+                      
+                      {/* Red Overlay from Screenshot */}
+                      <div className="absolute top-0 right-1 flex flex-col items-end z-10 scale-[0.6] origin-top-right">
+                        <div className="bg-[#FF4B5C] text-[10px] font-bold px-3 py-1.5 rounded-lg text-white shadow-lg mb-1 relative">
+                          Click here to create APIKey
+                          <div className="absolute -bottom-1 right-4 w-2 h-2 bg-[#FF4B5C] rotate-45"></div>
+                        </div>
+                        <div className="w-24 h-10 border-4 border-[#FF4B5C] rounded-xl"></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-3 text-left">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="w-6 h-6 bg-indigo-500/20 rounded-full flex items-center justify-center text-indigo-400 font-black text-[9px]">2</div>
+                      <h3 className="text-[9px] font-black uppercase tracking-widest text-slate-300">Copy Key</h3>
+                    </div>
+                    <div className="aspect-video bg-[#f8f9fa] rounded-lg border border-white/5 overflow-hidden relative group scale-95">
+                      {/* Mock Key List UI */}
+                      <div className="p-2 h-full flex flex-col bg-white">
+                        <div className="flex gap-1 mb-2">
+                          <div className="px-1.5 py-0.5 bg-gray-100 rounded-full text-[6px] text-gray-500">API key</div>
+                          <div className="px-1.5 py-0.5 bg-white border border-gray-200 rounded-full text-[6px] text-gray-500">Project</div>
+                        </div>
+                        <div className="p-1.5 border border-gray-100 rounded-md">
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="h-2 w-10 bg-blue-50 rounded"></div>
+                            <div className="flex gap-1.5">
+                              <div className="w-4 h-4 border border-gray-200 rounded flex items-center justify-center">
+                                <Copy size={8} className="text-gray-400" />
+                              </div>
+                              <div className="w-4 h-4 border border-gray-200 rounded"></div>
+                            </div>
+                          </div>
+                          <div className="h-1.5 w-20 bg-gray-50 rounded"></div>
+                        </div>
+                      </div>
+
+                      {/* Red Overlays from Screenshot */}
+                      <div className="absolute top-0 left-1/2 -translate-x-1/2 z-10 scale-[0.6] origin-top">
+                        <div className="bg-[#FF4B5C] text-[10px] font-bold px-4 py-2 rounded-lg text-white shadow-lg relative whitespace-nowrap">
+                          Click here to copy key
+                          <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-[#FF4B5C] rotate-45"></div>
+                        </div>
+                      </div>
+                      <div className="absolute top-6 right-6 w-6 h-6 border-4 border-[#FF4B5C] rounded-lg z-10"></div>
+                    </div>
+                  </div>
+
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-3 text-left">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="w-6 h-6 bg-indigo-500/20 rounded-full flex items-center justify-center text-indigo-400 font-black text-[9px]">3</div>
+                      <h3 className="text-[9px] font-black uppercase tracking-widest text-slate-300">Return</h3>
+                    </div>
+                    <div className="aspect-video bg-[#f8f9fa] rounded-lg border border-white/5 overflow-hidden relative group scale-95">
+                      {/* Mock Return UI - Refined to match screenshot */}
+                      <div className="p-2 h-full flex flex-col bg-white">
+                        <div className="space-y-2 mt-1 px-1">
+                          <div className="flex justify-between items-center">
+                            <div className="text-[6px] text-gray-400 font-medium">Project ID</div>
+                            <div className="text-[6px] text-gray-800 font-mono">gen-lang-client-0754986454</div>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <div className="text-[6px] text-gray-400 font-medium">Created</div>
+                            <div className="text-[6px] text-gray-800">Apr 7, 2026</div>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <div className="text-[6px] text-gray-400 font-medium">Billing tier</div>
+                            <div className="text-[6px] text-blue-500 font-medium">Free</div>
+                          </div>
+                        </div>
+                        
+                        {/* Mobile Navigation Bar Mock */}
+                        <div className="absolute bottom-0 left-0 right-0 h-6 bg-white border-t border-gray-100 flex items-center justify-around px-4">
+                          {/* Hamburger icon */}
+                          <div className="flex flex-col gap-[1px]">
+                            <div className="w-2.5 h-[1px] bg-gray-300"></div>
+                            <div className="w-2.5 h-[1px] bg-gray-300"></div>
+                            <div className="w-2.5 h-[1px] bg-gray-300"></div>
+                          </div>
+                          {/* Square icon */}
+                          <div className="w-2.5 h-2.5 border border-gray-300 rounded-[1px]"></div>
+                          {/* Triangle icon (Back) */}
+                          <div className="w-0 h-0 border-t-[3px] border-t-transparent border-r-[5px] border-r-gray-400 border-b-[3px] border-b-transparent"></div>
+                        </div>
+                      </div>
+
+                      {/* Red Overlays from Screenshot */}
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[85%] z-10 scale-[0.65]">
+                        <div className="bg-[#FF4B5C] text-[10px] font-bold px-4 py-3 rounded-lg text-white shadow-lg text-center leading-tight">
+                          click here to close and return to app
+                        </div>
+                      </div>
+
+                      {/* Red highlight around back button */}
+                      <div className="absolute bottom-0.5 right-3 w-6 h-5 border-4 border-[#FF4B5C] rounded-lg z-10"></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <a 
+                    href="https://aistudio.google.com/app/apikey" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 transition-all active:scale-95"
+                  >
+                    <ExternalLink size={18} className="text-indigo-500" />
+                    Open Google AI Studio
+                  </a>
+
+                  <div className="relative">
+                    <input 
+                      type="password"
+                      value={userApiKey}
+                      onChange={(e) => setUserApiKey(e.target.value)}
+                      placeholder="Paste your Gemini API Key here..."
+                      className="w-full py-5 px-6 bg-slate-950 border border-white/10 rounded-2xl text-white font-mono text-sm focus:border-indigo-500 outline-none transition-all placeholder:text-slate-700"
+                    />
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                      {userApiKey && <CheckCircle size={18} className="text-emerald-500" />}
+                    </div>
+                  </div>
+
+                  <button 
+                    onClick={handleConnectToBrain}
+                    disabled={isKeyValidating || !userApiKey.trim()}
+                    className="w-full py-5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 transition-all active:scale-95 shadow-xl shadow-indigo-500/20"
+                  >
+                    {isKeyValidating ? <RefreshCw size={20} className="animate-spin" /> : <Zap size={20} />}
+                    Connect to Brain
+                  </button>
+                </div>
+
+                <div className="mt-8 flex items-center justify-center gap-2 text-slate-500">
+                  <Volume2 size={14} className="animate-pulse text-indigo-500" />
+                  <p className="text-[9px] font-black uppercase tracking-widest">Voice Guidance Active</p>
+                </div>
+              </motion.div>
+            )}
+
             {onboardingStep === 4 && (
               <motion.div 
                 key="step4"
@@ -3342,9 +3591,9 @@ export default function AdvocatePortal() {
                       <div className="w-full max-w-2xl space-y-6 md:space-y-8">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4">
                           {[
-                            { step: 1, title: "Open Studio", desc: "Click the button to open Google AI Studio" },
-                            { step: 2, title: "Create Key", desc: "Click 'Create API key' in the sidebar" },
-                            { step: 3, title: "Copy & Paste", desc: "Copy the key and return here to paste" }
+                            { step: 1, title: "Open Studio", desc: "Click 'Open Google AI Studio' below" },
+                            { step: 2, title: "Create Key", desc: "Click the red 'Create API key' button" },
+                            { step: 3, title: "Copy & Return", desc: "Copy the key and return to paste it" }
                           ].map((s) => (
                             <div key={s.step} className="p-3 md:p-4 bg-white/5 border border-white/10 rounded-2xl flex md:flex-col items-center gap-4 md:gap-0">
                               <div className="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center text-xs font-black md:mb-3 flex-shrink-0">{s.step}</div>

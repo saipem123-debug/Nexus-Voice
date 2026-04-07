@@ -35,11 +35,23 @@ async function startServer() {
     sameSite: 'lax'
   }));
 
-  // --- OAuth 2.0 Client Setup ---
-  const oauth2Client = new OAuth2Client(
-    process.env.GOOGLE_CLIENT_ID || 'dummy-id',
-    process.env.GOOGLE_CLIENT_SECRET || 'dummy-secret'
-  );
+  // --- OAuth 2.0 Client Helper ---
+  const getOAuth2Client = (redirectUri?: string) => {
+    return new OAuth2Client(
+      process.env.GOOGLE_CLIENT_ID || 'dummy-id',
+      process.env.GOOGLE_CLIENT_SECRET || 'dummy-secret',
+      redirectUri
+    );
+  };
+
+  const getRedirectUri = (req: any) => {
+    if (process.env.APP_URL) {
+      return `${process.env.APP_URL.replace(/\/$/, '')}/auth/callback`;
+    }
+    const proto = (req.headers['x-forwarded-proto'] as string || req.protocol).split(',')[0].trim();
+    const host = req.get('host');
+    return `${proto}://${host}/auth/callback`;
+  };
 
   // --- API Routes ---
   app.use(express.static(path.join(process.cwd(), 'public')));
@@ -69,21 +81,17 @@ async function startServer() {
       return res.status(500).json({ error: "Google OAuth credentials not configured in environment variables." });
     }
 
-    // Use APP_URL if provided, otherwise derive from request
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const host = req.get('host');
-    const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
-    const redirectUri = `${baseUrl}/auth/callback`;
+    const redirectUri = getRedirectUri(req);
+    console.log('OAuth Auth URL - Redirect URI:', redirectUri);
 
-    const url = oauth2Client.generateAuthUrl({
+    const client = getOAuth2Client(redirectUri);
+    const url = client.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',
-      redirect_uri: redirectUri,
       scope: [
         'openid',
         'email',
-        'profile',
-        'https://www.googleapis.com/auth/generative-language'
+        'profile'
       ]
     });
     res.json({ url });
@@ -92,22 +100,20 @@ async function startServer() {
   // OAuth Callback Handler
   app.get("/auth/callback", async (req: any, res) => {
     const { code } = req.query;
-    try {
-      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-      const host = req.get('host');
-      const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
-      const redirectUri = `${baseUrl}/auth/callback`;
-      console.log('OAuth Callback - Redirect URI:', redirectUri);
-      console.log('OAuth Callback - Code received:', !!code);
+    if (!code) {
+      return res.status(400).send("No code provided");
+    }
 
-      const { tokens } = await oauth2Client.getToken({
-        code: code as string,
-        redirect_uri: redirectUri
-      });
-      oauth2Client.setCredentials(tokens);
+    try {
+      const redirectUri = getRedirectUri(req);
+      console.log('OAuth Callback - Redirect URI:', redirectUri);
+      
+      const client = getOAuth2Client(redirectUri);
+      const { tokens } = await client.getToken(code as string);
+      client.setCredentials(tokens);
 
       // Get user info to identify them
-      const ticket = await oauth2Client.verifyIdToken({
+      const ticket = await client.verifyIdToken({
         idToken: tokens.id_token!,
         audience: process.env.GOOGLE_CLIENT_ID,
       });
@@ -195,9 +201,10 @@ async function startServer() {
     // Refresh token
     if (!user.refresh_token) return res.status(400).json({ error: "No refresh token available" });
 
+    const client = getOAuth2Client();
     try {
-      oauth2Client.setCredentials({ refresh_token: user.refresh_token });
-      const { credentials } = await oauth2Client.refreshAccessToken();
+      client.setCredentials({ refresh_token: user.refresh_token });
+      const { credentials } = await client.refreshAccessToken();
       
       const stmt = db.prepare(`
         UPDATE users SET access_token = ?, expiry_date = ? WHERE id = ?

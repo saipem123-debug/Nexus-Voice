@@ -63,6 +63,7 @@ export class HybridAIEngine {
   public setApiKey(apiKey: string) {
     const localDB = LocalDB.getInstance();
     localDB.run("INSERT OR REPLACE INTO config (key, value) VALUES ('gemini_api_key', ?)", [apiKey]);
+    localStorage.setItem('nexus_gemini_api_key', 'true'); // Flag for quick check
     this.genAI = new GoogleGenAI({ apiKey });
     this.geminiReady = true;
   }
