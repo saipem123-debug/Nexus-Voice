@@ -97,7 +97,7 @@ export default function AdvocatePortal() {
   const [view, setView] = useState("command");
   const [aiStatus, setAiStatus] = useState<any>({});
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
-  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(true);
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [showTutorial, setShowTutorial] = useState(false);
   const [user, setUser] = useState<any>(null);
@@ -114,24 +114,27 @@ export default function AdvocatePortal() {
         const response = await axios.get('/api/ai/status');
         setIsLoggedIn(response.data.isLoggedIn);
         setAiStatus(response.data);
+        
+        const onboardingComplete = localStorage.getItem('onboarding_complete') === 'true';
+        
         if (response.data.isLoggedIn) {
-          // In a real app, we'd fetch user profile here
           setUser({
             displayName: 'Advocate',
             email: 'user@nexus.justice',
             photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
           });
           
-          // Check if Gemini is already configured (either via backend or local storage)
-          const localKey = localStorage.getItem('nexus_sqlite_db'); // This is just a check for DB existence
           const isConfigured = response.data.geminiConfigured || !!localStorage.getItem('nexus_gemini_api_key');
           
-          if (isConfigured) {
-            setOnboardingStep(4); // Skip to ready
+          if (onboardingComplete && isConfigured) {
+            setShowOnboarding(false);
+          } else if (isConfigured) {
+            setOnboardingStep(4);
+            setShowOnboarding(true);
           } else {
-            setOnboardingStep(2); // Go to BYOK
+            setOnboardingStep(2);
+            setShowOnboarding(true);
           }
-          setShowOnboarding(true);
         } else {
           setShowOnboarding(true);
           setOnboardingStep(1);
@@ -139,6 +142,9 @@ export default function AdvocatePortal() {
         setIsAuthReady(true);
       } catch (err) {
         console.error("Auth check failed:", err);
+        // If auth check fails, we must force login for safety
+        setShowOnboarding(true);
+        setOnboardingStep(1);
         setIsAuthReady(true);
       }
     };
@@ -759,10 +765,11 @@ export default function AdvocatePortal() {
       checkStatus();
       const statusInterval = setInterval(checkStatus, 10000);
       
-      if (!localStorage.getItem('onboarding_complete')) {
-        setShowOnboarding(true);
-        setOnboardingStep(1);
-      }
+      // No longer force onboarding here as it's handled in the main auth check
+      // if (!localStorage.getItem('onboarding_complete')) {
+      //   setShowOnboarding(true);
+      //   setOnboardingStep(1);
+      // }
 
       return () => clearInterval(statusInterval);
     };
