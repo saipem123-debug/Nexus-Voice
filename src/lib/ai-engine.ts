@@ -158,16 +158,31 @@ export class HybridAIEngine {
           history,
           imageBase64,
           systemInstruction: "You are the primary AI Orchestrator for Nexus Justice. You handle legal research, drafting, and consultation. You are professional and authoritative."
-        }, { signal });
+        }, { 
+          signal,
+          timeout: 30000 // 30s timeout
+        });
         
         if (response.data && response.data.text) {
           console.log("Server-side AI proxy responded.");
           return response.data.text;
         }
-      } catch (proxyErr) {
-        console.error("Server-side proxy failed for OAuth token:", proxyErr);
-        // If proxy fails for OAuth, we don't have a good fallback because client-side OAuth is unreliable
-        return null;
+        
+        if (response.data && response.data.error) {
+          console.error("Server-side AI error:", response.data.error);
+          return `Error: ${response.data.error}`;
+        }
+      } catch (proxyErr: any) {
+        console.error("Server-side proxy failed for OAuth token:", proxyErr.response?.data || proxyErr.message);
+        const errorMsg = proxyErr.response?.data?.error || proxyErr.message;
+        
+        // If it's a 401/403, maybe the token is invalid, try to refresh once
+        if (proxyErr.response?.status === 401 || proxyErr.response?.status === 403) {
+          console.log("Token might be invalid, attempting one-time refresh...");
+          await this.refreshAccessToken();
+        }
+        
+        return `I'm having trouble connecting to the AI service: ${errorMsg}. Please try again in a moment.`;
       }
     }
 
@@ -225,12 +240,13 @@ export class HybridAIEngine {
         
         console.log("Client-side Gemini responded.");
         return response.text || null;
-      } catch (err) {
+      } catch (err: any) {
         if (err instanceof Error && err.name === 'AbortError') {
           console.log("Gemini request aborted.");
           return null;
         }
         console.error("Gemini client-side failed:", err);
+        return `Client-side AI Error: ${err.message || 'Unknown error'}`;
       }
     }
 
@@ -242,13 +258,17 @@ export class HybridAIEngine {
         history,
         imageBase64,
         systemInstruction: "You are the primary AI Orchestrator for Nexus Justice. You handle legal research, drafting, and consultation. You are professional and authoritative."
-      }, { signal });
+      }, { signal, timeout: 30000 });
       
       if (response.data && response.data.text) {
         return response.data.text;
       }
-    } catch (e) {
-      console.error("Final AI fallback failed:", e);
+      
+      if (response.data && response.data.error) {
+        return `AI Error: ${response.data.error}`;
+      }
+    } catch (e: any) {
+      console.error("Final AI fallback failed:", e.response?.data || e.message);
     }
 
     return null;

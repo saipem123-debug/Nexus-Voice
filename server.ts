@@ -258,13 +258,6 @@ async function startServer() {
 
       const { prompt, history, imageBase64, systemInstruction } = req.body;
       
-      // Use the appropriate AI instance based on whether we have an OAuth token or API key
-      const aiInstance = isOAuth ? new GoogleGenAI({ apiKey: userToken }) : genAI;
-      
-      if (!aiInstance) {
-        return res.status(503).json({ error: "AI Engine not initialized." });
-      }
-
       const contents: any[] = [];
       if (history && Array.isArray(history)) {
         for (const m of history) {
@@ -290,21 +283,48 @@ async function startServer() {
         parts: userParts
       });
 
-      // @ts-ignore
-      const result = await aiInstance.models.generateContent({
-        model: "gemini-2.0-flash",
-        config: {
-          systemInstruction: systemInstruction || "You are a helpful legal assistant.",
+      // Use the appropriate method based on whether we have an OAuth token or API key
+      let text = "";
+      
+      if (isOAuth) {
+        // For OAuth tokens, use the REST API directly as it's more reliable than the SDK for this
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`;
+        const response = await axios.post(url, {
+          contents: contents,
+          systemInstruction: {
+            parts: [{ text: systemInstruction || "You are a helpful legal assistant." }]
+          },
           tools: [{ googleSearch: {} }]
-        },
+        }, {
+          headers: {
+            'Authorization': `Bearer ${userToken}`,
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        text = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      } else {
+        if (!genAI) {
+          return res.status(503).json({ error: "AI Engine not initialized." });
+        }
         // @ts-ignore
-        contents: contents
-      });
+        const result = await genAI.models.generateContent({
+          model: "gemini-2.0-flash",
+          config: {
+            systemInstruction: systemInstruction || "You are a helpful legal assistant.",
+            tools: [{ googleSearch: {} }]
+          },
+          // @ts-ignore
+          contents: contents
+        });
+        text = result.text;
+      }
 
-      res.json({ text: result.text });
-    } catch (error) {
-      console.error("Server AI Error:", error);
-      res.status(500).json({ error: "Failed to generate AI response." });
+      res.json({ text });
+    } catch (error: any) {
+      console.error("Server AI Error:", error.response?.data || error.message || error);
+      const errorMessage = error.response?.data?.error?.message || "Failed to generate AI response.";
+      res.status(500).json({ error: errorMessage });
     }
   });
 
