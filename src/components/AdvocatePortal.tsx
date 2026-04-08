@@ -309,6 +309,46 @@ export default function AdvocatePortal() {
   const audioQueueRef = useRef<Int16Array[]>([]);
   const isPlayingLiveRef = useRef(false);
 
+  useEffect(() => {
+    if (user && autoStartLive) {
+      setNotifications(prev => [
+        { id: Date.now(), message: "Always-On Voice Mode Active. Click anywhere to initialize the live mic.", date: new Date().toISOString().split('T')[0], read: false, type: 'system' },
+        ...prev
+      ]);
+    }
+  }, [user]);
+
+  const [autoStartLive, setAutoStartLive] = useState(true);
+
+  useEffect(() => {
+    if (user && autoStartLive && !isLiveMode && !liveSessionRef.current) {
+      const handleFirstInteraction = () => {
+        if (autoStartLive && !isLiveMode && !liveSessionRef.current) {
+          startLiveSession();
+        }
+        // Prime speech synthesis
+        if ('speechSynthesis' in window) {
+          const v = new SpeechSynthesisUtterance("");
+          v.volume = 0;
+          window.speechSynthesis.speak(v);
+        }
+        window.removeEventListener('click', handleFirstInteraction);
+        window.removeEventListener('keydown', handleFirstInteraction);
+        window.removeEventListener('touchstart', handleFirstInteraction);
+      };
+      
+      window.addEventListener('click', handleFirstInteraction);
+      window.addEventListener('keydown', handleFirstInteraction);
+      window.addEventListener('touchstart', handleFirstInteraction);
+      
+      return () => {
+        window.removeEventListener('click', handleFirstInteraction);
+        window.removeEventListener('keydown', handleFirstInteraction);
+        window.removeEventListener('touchstart', handleFirstInteraction);
+      };
+    }
+  }, [user, autoStartLive, isLiveMode]);
+
   const startLiveSession = async () => {
     try {
       setIsLiveMode(true);
@@ -347,10 +387,23 @@ export default function AdvocatePortal() {
         onerror: (err) => {
           console.error("Live session error:", err);
           stopLiveSession();
+          // If it was an error, we might want to try again after a delay if autoStart is still true
+          if (autoStartLive) {
+            setTimeout(() => {
+              if (autoStartLive && !isLiveMode) startLiveSession();
+            }, 3000);
+          }
         },
         onclose: () => {
           console.log("Live session closed");
-          stopLiveSession();
+          if (autoStartLive) {
+            // Reconnect if it closed but we still want it on
+            setTimeout(() => {
+              if (autoStartLive && !isLiveMode) startLiveSession();
+            }, 1000);
+          } else {
+            stopLiveSession();
+          }
         }
       });
 
@@ -362,6 +415,7 @@ export default function AdvocatePortal() {
   };
 
   const stopLiveSession = () => {
+    setAutoStartLive(false); // Disable auto-start if user manually stops
     setIsLiveMode(false);
     setVoiceAiStatus("");
     if (liveSessionRef.current) {
@@ -378,6 +432,9 @@ export default function AdvocatePortal() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const audioContext = new AudioContext({ sampleRate: 16000 });
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
       audioContextLiveRef.current = audioContext;
 
       const source = audioContext.createMediaStreamSource(stream);
@@ -465,6 +522,10 @@ export default function AdvocatePortal() {
     const pcmData = audioQueueRef.current.shift()!;
     const audioContext = audioContextLiveRef.current;
     if (!audioContext) return;
+    
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
 
     const floatData = new Float32Array(pcmData.length);
     for (let i = 0; i < pcmData.length; i++) {
@@ -529,6 +590,7 @@ export default function AdvocatePortal() {
       const response = await aiEngine.generateResponse(text, history);
 
       setSupportMsgs(prev => [...prev, { id: Date.now() + 1, role: 'ai', text: response.text }]);
+      speakResponse(response.text);
     } catch (error) {
       console.error("Support AI failed:", error);
       setSupportMsgs(prev => [...prev, { id: Date.now() + 1, role: 'ai', text: "I'm having trouble connecting to the support server. Please try again later." }]);
@@ -575,7 +637,7 @@ export default function AdvocatePortal() {
   const [converterPhase, setConverterPhase] = useState<'idle' | 'scanning' | 'translating'>('idle');
 
   // Voice AI Dock
-  const [voiceAiOn, setVoiceAiOn] = useState(false);
+  const [voiceAiOn, setVoiceAiOn] = useState(true);
   const [voiceAiListening, setVoiceAiListening] = useState(false);
   const [voiceAiThinking, setVoiceAiThinking] = useState(false);
   const [voiceAiSpeaking, setVoiceAiSpeaking] = useState(false);
@@ -1026,6 +1088,7 @@ export default function AdvocatePortal() {
       );
       const aiId = localDB.run("INSERT INTO chat_history (role, content, engine) VALUES (?, ?, ?)", ['assistant', response.text, response.engine]);
       setChatHistory(prev => [...prev, { id: aiId || undefined, role: 'assistant', content: response.text, engine: response.engine }]);
+      speakResponse(response.text);
     } catch (err) {
       if (err instanceof Error && err.message === "Aborted") {
         console.log("Consult request aborted");
@@ -1176,6 +1239,7 @@ export default function AdvocatePortal() {
         (status) => setVoiceAiStatus(status)
       );
       setDeskChatHistory(prev => [...prev, { role: 'ai', text: response.text, engine: response.engine }]);
+      speakResponse(response.text);
     } catch (err) {
       if (err instanceof Error && err.message === "Aborted") {
         console.log("Desk chat request aborted");
@@ -1792,7 +1856,18 @@ export default function AdvocatePortal() {
   }, []);
 
   const fallbackToBrowserTTS = (text: string) => {
-    console.log("Falling back to Browser TTS.");
+    console.log("Falling back to Browser TTS. Text length:", text.length);
+    // Ensure we have voices loaded
+    if (window.speechSynthesis.getVoices().length === 0) {
+      console.log("No voices yet, waiting for voiceschanged...");
+      window.speechSynthesis.addEventListener('voiceschanged', () => fallbackToBrowserTTS(text), { once: true });
+      return;
+    }
+
+    if (window.speechSynthesis.paused) {
+      console.log("SpeechSynthesis was paused, resuming...");
+      window.speechSynthesis.resume();
+    }
     window.speechSynthesis.cancel();
     
     // Set speaking state immediately
@@ -1800,39 +1875,87 @@ export default function AdvocatePortal() {
     isSpeakingRef.current = true;
     
     const cleanText = sanitizeForSpeech(text);
-    const utterance = new SpeechSynthesisUtterance(cleanText);
     
-    // Detect Malayalam characters (\u0D00-\u0D7F)
-    const hasMalayalam = /[\u0D00-\u0D7F]/.test(text);
-    const lang = hasMalayalam ? 'ml-IN' : 'en-US';
-    utterance.lang = lang;
+    // Split text into smaller chunks (max 200 chars) for better reliability
+    const chunks: string[] = [];
+    const words = cleanText.split(' ');
+    let currentChunk = '';
+    
+    words.forEach(word => {
+      if ((currentChunk + word).length < 200) {
+        currentChunk += (currentChunk ? ' ' : '') + word;
+      } else {
+        chunks.push(currentChunk);
+        currentChunk = word;
+      }
+    });
+    if (currentChunk) chunks.push(currentChunk);
 
-    // Try to find a consistent voice
-    const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find(v => v.lang.startsWith(lang) && (v.name.includes('Female') || v.name.includes('Google') || v.name.includes('Samantha'))) 
-                         || voices.find(v => v.lang.startsWith(lang));
-    
-    if (preferredVoice) {
-      utterance.voice = preferredVoice;
-    }
+    console.log(`Split text into ${chunks.length} chunks.`);
 
-    utterance.onstart = () => {
-      setVoiceAiSpeaking(true);
-      isSpeakingRef.current = true;
-    };
-    utterance.onend = () => {
-      setVoiceAiSpeaking(false);
-      isSpeakingRef.current = false;
-    };
-    utterance.onerror = (e) => {
-      console.error("Speech synthesis error:", e);
-      setVoiceAiSpeaking(false);
-      isSpeakingRef.current = false;
-    };
-    
-    setTimeout(() => {
+    let chunkIndex = 0;
+
+    const speakNextChunk = () => {
+      if (chunkIndex >= chunks.length) {
+        console.log("All chunks spoken.");
+        setVoiceAiSpeaking(false);
+        isSpeakingRef.current = false;
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(chunks[chunkIndex]);
+      utterance.volume = 1;
+      utterance.rate = 1;
+      
+      // Detect Malayalam characters (\u0D00-\u0D7F)
+      const hasMalayalam = /[\u0D00-\u0D7F]/.test(chunks[chunkIndex]);
+      const lang = hasMalayalam ? 'ml-IN' : 'en-US';
+      utterance.lang = lang;
+
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice = voices.find(v => v.lang.startsWith(lang) && (v.name.includes('Female') || v.name.includes('Google') || v.name.includes('Samantha'))) 
+                           || voices.find(v => v.lang.startsWith(lang));
+      
+      if (preferredVoice) utterance.voice = preferredVoice;
+
+      utterance.onstart = () => {
+        console.log(`Started speaking chunk ${chunkIndex + 1}/${chunks.length}`);
+        setVoiceAiSpeaking(true);
+        isSpeakingRef.current = true;
+      };
+
+      utterance.onend = () => {
+        console.log(`Finished chunk ${chunkIndex + 1}/${chunks.length}`);
+        chunkIndex++;
+        speakNextChunk();
+      };
+
+      utterance.onerror = (e) => {
+        console.error(`Speech synthesis error on chunk ${chunkIndex + 1}:`, e);
+        // Try next chunk anyway or stop
+        chunkIndex++;
+        if (chunkIndex < chunks.length) {
+          speakNextChunk();
+        } else {
+          setVoiceAiSpeaking(false);
+          isSpeakingRef.current = false;
+        }
+      };
+
       window.speechSynthesis.speak(utterance);
-    }, 50);
+    };
+
+    // Some browsers require a small delay after cancel()
+    setTimeout(() => {
+      try {
+        if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+        speakNextChunk();
+      } catch (e) {
+        console.error("Failed to start chunked speech synthesis:", e);
+        setVoiceAiSpeaking(false);
+        isSpeakingRef.current = false;
+      }
+    }, 250);
   };
 
   const isProcessingRef = useRef(false);
@@ -2081,15 +2204,15 @@ export default function AdvocatePortal() {
   }, [voiceAiLang]);
 
   useEffect(() => {
-    if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isProcessing && !isStartingRef.current) {
+    if (voiceAiOn && !isLiveMode && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isProcessing && !isStartingRef.current) {
       const timer = setTimeout(() => {
-        if (voiceAiOn && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isProcessing && !isStartingRef.current) {
+        if (voiceAiOn && !isLiveMode && !voiceAiListening && !voiceAiThinking && !voiceAiSpeaking && !isProcessing && !isStartingRef.current) {
           startVoiceAi();
         }
       }, 1500);
       return () => clearTimeout(timer);
     }
-  }, [voiceAiOn, voiceAiListening, voiceAiThinking, voiceAiSpeaking, isProcessing, startVoiceAi]);
+  }, [voiceAiOn, isLiveMode, voiceAiListening, voiceAiThinking, voiceAiSpeaking, isProcessing, startVoiceAi]);
 
   const stopVoiceAi = useCallback(() => {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
@@ -2105,7 +2228,7 @@ export default function AdvocatePortal() {
       } catch (e) {}
       recognitionRef.current = null;
     }
-    window.speechSynthesis.cancel();
+    // Removed window.speechSynthesis.cancel() from here to prevent accidental cutoff of AI speaking
     setVoiceAiOn(false);
     setVoiceAiListening(false);
     setVoiceAiSpeaking(false);
@@ -2128,8 +2251,39 @@ export default function AdvocatePortal() {
     }
   }, [voiceAiOn, stopVoiceAi, startVoiceAi]);
 
+  useEffect(() => {
+    if (voiceAiOn) {
+      if (isLiveMode) {
+        stopVoiceAi();
+      } else {
+        startVoiceAi();
+      }
+    } else {
+      stopVoiceAi();
+    }
+  }, [voiceAiOn, isLiveMode, stopVoiceAi, startVoiceAi]);
+
+  const fixAudio = async () => {
+    console.log("Fixing audio systems...");
+    if (audioContextRef.current) {
+      try { await audioContextRef.current.resume(); } catch(e) {}
+    }
+    if (audioContextLiveRef.current) {
+      try { await audioContextLiveRef.current.resume(); } catch(e) {}
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+      const v = new SpeechSynthesisUtterance("Audio system reset. I am ready to read.");
+      v.volume = 1;
+      v.rate = 1;
+      window.speechSynthesis.speak(v);
+    }
+  };
+
   const resetVoiceAi = useCallback(() => {
     console.log("Resetting Voice AI...");
+    fixAudio();
     if (abortControllerRef.current) abortControllerRef.current.abort();
     stopVoiceAi();
     setVoiceAiReply('');
@@ -2363,7 +2517,7 @@ export default function AdvocatePortal() {
                       </div>
                       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
                         <button onClick={() => isLiveMode ? stopLiveSession() : startLiveSession()} style={{ flex: 1, padding: '8px 0', background: isLiveMode ? '#ef4444' : '#6366f1', border: 'none', borderRadius: 8, color: '#fff', fontSize: 10, fontWeight: 900 }}>
-                          {isLiveMode ? 'Stop Live' : 'Start Live'}
+                          {isLiveMode ? 'Stop Live' : (autoStartLive ? 'Always On (Waiting...)' : 'Start Live')}
                         </button>
                       </div>
                       
@@ -2775,13 +2929,13 @@ export default function AdvocatePortal() {
                     )}
                   </div>
                   <div style={{ display: 'flex', gap: 10 }}>
-                    <input value={consoleInput} onChange={e => setConsoleInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendConsult()} placeholder="Ask anything legal..." style={{ flex: 1, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 14, padding: '13px 18px' }} />
+                    <input value={consoleInput} onChange={e => setConsoleInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && (fixAudio(), sendConsult())} placeholder="Ask anything legal..." style={{ flex: 1, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 14, padding: '13px 18px' }} />
                     {consoleLoading ? (
                       <button onClick={() => { if(abortControllerRef.current) abortControllerRef.current.abort(); setConsoleLoading(false); }} style={{ padding: '13px 22px', background: '#ef4444', border: 'none', borderRadius: 14, color: '#fff', fontWeight: 900, display: 'flex', alignItems: 'center', gap: 8 }}>
                         <Square size={14} fill="currentColor" /> Stop
                       </button>
                     ) : (
-                      <button onClick={() => sendConsult()} style={{ padding: '13px 22px', background: '#6366f1', border: 'none', borderRadius: 14, color: '#fff', fontWeight: 900 }}>Send</button>
+                      <button onClick={() => { fixAudio(); sendConsult(); }} style={{ padding: '13px 22px', background: '#6366f1', border: 'none', borderRadius: 14, color: '#fff', fontWeight: 900 }}>Send</button>
                     )}
                   </div>
                 </div>
@@ -4039,11 +4193,29 @@ export default function AdvocatePortal() {
                 )}
                 {voiceAiReply && (
                   <div style={{ position: 'relative' }}>
-                    <div className="markdown-body" style={{ fontSize: 11, marginTop: 8, paddingRight: 24 }}>
+                    <div className="markdown-body" style={{ fontSize: 11, marginTop: 8, paddingRight: 32 }}>
                       <ReactMarkdown>{voiceAiReply}</ReactMarkdown>
                     </div>
-                    <button onClick={() => speakResponse(voiceAiReply)} style={{ position: 'absolute', top: 8, right: 0, background: 'none', border: 'none', cursor: 'pointer', color: '#6366f1' }}>
-                      <Volume2 size={14} />
+                    <button 
+                      onClick={() => { fixAudio(); speakResponse(voiceAiReply); }} 
+                      style={{ 
+                        position: 'absolute', 
+                        top: 0, 
+                        right: 0, 
+                        background: 'rgba(99,102,241,0.1)', 
+                        border: 'none', 
+                        borderRadius: 8,
+                        width: 32,
+                        height: 32,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer', 
+                        color: '#6366f1' 
+                      }}
+                      title="Fix Audio & Read Aloud"
+                    >
+                      <Volume2 size={16} />
                     </button>
                   </div>
                 )}
@@ -4062,9 +4234,16 @@ export default function AdvocatePortal() {
                     </div>
                   )}
                 <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
-                    Engine: {activeEngine || (isOffline ? 'None' : 'Gemini 2.5 Flash')}
-                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
+                      Engine: {activeEngine || (isOffline ? 'None' : 'Gemini 2.5 Flash')}
+                    </span>
+                    {voiceAiSpeaking && (
+                      <div style={{ display: 'flex', gap: 2 }}>
+                        {[0,1,2].map(i => <motion.div key={i} animate={{ height: [2, 8, 2] }} transition={{ repeat: Infinity, duration: 0.5, delay: i*0.1 }} style={{ width: 2, background: '#10b981' }} />)}
+                      </div>
+                    )}
+                  </div>
                   {(voiceAiReply || voiceAiThinking) && (
                     <button onClick={resetVoiceAi} style={{ fontSize: 8, color: '#6366f1', fontWeight: 900, textTransform: 'uppercase', background: 'none', border: 'none', cursor: 'pointer' }}>
                       Reset
@@ -4083,7 +4262,7 @@ export default function AdvocatePortal() {
             <motion.button 
               animate={voiceAiListening ? { scale: [1, 1.15, 1], boxShadow: ["0 0 0px rgba(239, 68, 68, 0)", "0 0 20px rgba(239, 68, 68, 0.5)", "0 0 0px rgba(239, 68, 68, 0)"] } : { scale: 1 }}
               transition={{ repeat: Infinity, duration: 1.5 }}
-              onClick={toggleVoiceAi} 
+              onClick={() => { fixAudio(); toggleVoiceAi(); }} 
               style={{ width: 56, height: 56, borderRadius: '50%', background: voiceAiOn ? '#ef4444' : '#6366f1', border: 'none', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.3s', cursor: 'pointer' }}
             >
               {voiceAiOn ? <Square size={24} fill="#fff" /> : <Mic size={24} />}
@@ -4091,8 +4270,8 @@ export default function AdvocatePortal() {
             <div style={{ width: 1, height: 32, background: 'rgba(255,255,255,.1)' }} />
             <div style={{ textAlign: 'left' }}>
               <div style={{ fontSize: 9, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Nexus Link</div>
-              <div style={{ fontSize: 8, color: voiceAiListening ? '#ef4444' : voiceAiThinking ? '#6366f1' : voiceAiOn ? '#10b981' : '#475569', fontWeight: 700 }}>
-                {voiceAiListening ? '● LISTENING...' : voiceAiThinking ? '● THINKING...' : voiceAiOn ? '● ACTIVE' : 'STANDBY'}
+              <div style={{ fontSize: 8, color: isLiveMode ? '#10b981' : voiceAiListening ? '#ef4444' : voiceAiThinking ? '#6366f1' : voiceAiOn ? '#10b981' : '#475569', fontWeight: 700 }}>
+                {isLiveMode ? '● LIVE ACTIVE' : voiceAiListening ? '● LISTENING...' : voiceAiThinking ? '● THINKING...' : voiceAiOn ? '● ACTIVE' : 'STANDBY'}
               </div>
             </div>
           </div>
