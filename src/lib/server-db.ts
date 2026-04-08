@@ -12,6 +12,7 @@ db.exec(`
     refresh_token TEXT,
     access_token TEXT,
     expiry_date INTEGER,
+    gemini_api_key TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);

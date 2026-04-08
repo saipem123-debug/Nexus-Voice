@@ -68,7 +68,7 @@ async function startServer() {
     
     if (userId) {
       const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
-      if (user && user.refresh_token) {
+      if (user && (user.refresh_token || user.gemini_api_key)) {
         geminiConfigured = true;
       }
     }
@@ -77,6 +77,15 @@ async function startServer() {
       geminiConfigured,
       isLoggedIn: !!userId
     });
+  });
+
+  app.post("/api/user/apikey", (req: any, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const { apiKey } = req.body;
+    if (!apiKey || !apiKey.startsWith('AIza')) return res.status(400).json({ error: "Invalid key" });
+    db.prepare('UPDATE users SET gemini_api_key = ? WHERE id = ?').run(apiKey, userId);
+    res.json({ success: true });
   });
 
   // Google OAuth URL for Gemini BYOK
@@ -232,7 +241,7 @@ async function startServer() {
       if (userId) {
         const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
         if (user) {
-          // Check if we need to refresh
+          // Priority 1: OAuth Token
           if (user.refresh_token && (!user.expiry_date || Date.now() >= user.expiry_date - 300000)) {
             const client = getOAuth2Client();
             try {
@@ -248,6 +257,12 @@ async function startServer() {
           } else if (user.access_token) {
             userToken = user.access_token;
             isOAuth = true;
+          }
+          
+          // Priority 2: Stored API Key (if no OAuth token)
+          if (!isOAuth && user.gemini_api_key) {
+            userToken = user.gemini_api_key;
+            isOAuth = false;
           }
         }
       }

@@ -17,8 +17,18 @@ export class HybridAIEngine {
   private geminiReady: boolean = false;
 
   private constructor() {
-    this.updateStatus();
-    this.init();
+    // Synchronous check for local key to avoid "Offline" flicker
+    try {
+      const localDB = LocalDB.getInstance();
+      const config = localDB.query("SELECT value FROM config WHERE key = 'gemini_api_key'");
+      if (config.length > 0 && config[0].value) {
+        this.geminiReady = true;
+      }
+    } catch (e) {}
+
+    this.init().then(() => {
+      this.updateStatus(true);
+    });
   }
 
   private async init() {
@@ -134,9 +144,12 @@ export class HybridAIEngine {
     this.lastStatusUpdate = now;
     try {
       const response = await axios.get('/api/ai/status', { timeout: 5000 });
-      this.geminiReady = response.data.geminiConfigured || !!this.genAI;
+      // geminiReady is true if server has a key, OR if we have a client-side SDK instance, OR if we have an OAuth token
+      this.geminiReady = response.data.geminiConfigured || !!this.genAI || !!this.accessToken;
     } catch (e) {
       console.warn("Failed to fetch AI status from backend");
+      // Fallback: if we have local credentials, we are still ready
+      this.geminiReady = !!this.genAI || !!this.accessToken;
     }
   }
 
@@ -148,115 +161,23 @@ export class HybridAIEngine {
   }
 
   private async callGemini(prompt: string, history: AIMessage[], imageBase64?: string, signal?: AbortSignal): Promise<string | null> {
-    // Ensure we have a valid token/key
-    if (!this.accessToken && !this.genAI) {
-      this.loadStaticApiKey();
-    }
-    
     try {
-      if (signal?.aborted) return null;
-      
-      const sanitizedHistory: any[] = [];
-      let lastRole = '';
-      const historyToProcess = history.filter(m => m.content !== prompt || m !== history[history.length - 1]);
-
-      for (const m of historyToProcess) {
-        const role = m.role === 'assistant' ? 'model' : 'user';
-        if (role === lastRole) continue; 
-        sanitizedHistory.push({
-          role,
-          parts: [{ text: m.content }]
-        });
-        lastRole = role;
-      }
-
-      if (lastRole === 'user' && sanitizedHistory.length > 0) {
-        sanitizedHistory.pop();
-      }
-
-      const contents = [
-        ...sanitizedHistory,
-        {
-          role: 'user',
-          parts: [
-            { text: prompt },
-            ...(imageBase64 ? [{
-              inlineData: {
-                mimeType: "image/jpeg",
-                data: imageBase64.split(',')[1]
-              }
-            }] : [])
-          ]
-        }
-      ];
-
       const systemInstruction = "You are the primary AI Orchestrator for Nexus Justice. You handle legal research, drafting, and consultation. You are professional and authoritative.";
 
-      // 1. If we have an OAuth access token, use the REST API directly from the client
-      if (this.accessToken) {
-        console.log("Calling Gemini REST API directly from client with OAuth token...");
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent`;
-        
-        try {
-          const response = await axios.post(url, {
-            contents: contents,
-            systemInstruction: {
-              parts: [{ text: systemInstruction }]
-            },
-            tools: [{ googleSearch: {} }]
-          }, {
-            headers: {
-              'Authorization': `Bearer ${this.accessToken}`,
-              'Content-Type': 'application/json'
-            },
-            signal,
-            timeout: 30000
-          });
-          
-          console.log("Direct REST API call successful.");
-          return response.data.candidates?.[0]?.content?.parts?.[0]?.text || null;
-        } catch (restErr: any) {
-          console.error("Direct REST API call failed:", restErr.response?.data || restErr.message);
-          
-          // If CORS or other direct call issue, fallback to server proxy as a last resort
-          console.log("Falling back to server proxy due to direct call failure...");
-          const proxyResponse = await axios.post('/api/ai/generate', {
-            prompt,
-            history,
-            imageBase64,
-            systemInstruction
-          }, { signal, timeout: 30000 });
-          
-          return proxyResponse.data.text || proxyResponse.data.error || null;
-        }
-      }
-
-      // 2. If we have a direct API key, use the SDK
-      if (this.genAI) {
-        console.log("Calling Gemini SDK directly from client with API key...");
-        // @ts-ignore
-        const response = await this.genAI.models.generateContent({
-          model: "gemini-3-flash-preview",
-          config: {
-            systemInstruction,
-            tools: [{ googleSearch: {} }]
-          },
-          // @ts-ignore
-          contents: contents
-        });
-        
-        console.log("Direct SDK call successful.");
-        return response.text || null;
-      }
-    } catch (err: any) {
-      if (err instanceof Error && err.name === 'AbortError') return null;
-      console.error("Direct Gemini call failed:", err.response?.data || err.message || err);
+      // Use server proxy for all calls to ensure reliability and bypass CORS/BYOK issues
+      console.log("Calling Gemini via server proxy...");
+      const proxyResponse = await axios.post('/api/ai/generate', {
+        prompt,
+        history,
+        imageBase64,
+        systemInstruction
+      }, { signal, timeout: 30000 });
       
-      const errorDetail = err.response?.data?.error?.message || err.message || "Unknown error";
-      return `AI Error: ${errorDetail}`;
+      return proxyResponse.data.text || proxyResponse.data.error || null;
+    } catch (error: any) {
+      console.error("AI Engine Error:", error.response?.data || error.message);
+      return `AI Error: ${error.response?.data?.error || error.message}`;
     }
-
-    return null;
   }
 
   public async generateResponse(
@@ -274,7 +195,7 @@ export class HybridAIEngine {
     const execute = async (): Promise<{ text: string, engine: string }> => {
       if (signal?.aborted) throw new Error("Aborted");
 
-      onStatusUpdate?.("Orchestrating task...");
+      onStatusUpdate?.("Gemini is orchestrating...");
       await this.updateStatus();
 
       const canUseOnline = navigator.onLine;
@@ -285,7 +206,7 @@ export class HybridAIEngine {
 
       // Use Gemini 3 Flash Orchestrator
       if (this.geminiReady) {
-        onStatusUpdate?.("Consulting Gemini 3 Flash...");
+        onStatusUpdate?.("Gemini 3 Flash is consulting...");
         const geminiResponse = await this.callGemini(prompt, history, imageBase64, signal);
         if (geminiResponse) {
           return { text: geminiResponse, engine: 'Gemini 3 Flash' };

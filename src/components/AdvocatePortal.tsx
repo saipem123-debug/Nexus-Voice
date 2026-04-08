@@ -97,6 +97,17 @@ export default function AdvocatePortal() {
   const [view, setView] = useState("command");
   const [aiStatus, setAiStatus] = useState<any>({});
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [showTutorial, setShowTutorial] = useState(false);
@@ -186,6 +197,13 @@ export default function AdvocatePortal() {
       localDB.setConfig('gemini_api_key', userApiKey.trim());
       localStorage.setItem('nexus_gemini_api_key', userApiKey.trim());
       localStorage.setItem('onboarding_complete', 'true');
+
+      // Sync key with server for robust BYOK
+      try {
+        await axios.post('/api/user/apikey', { apiKey: userApiKey.trim() });
+      } catch (syncErr) {
+        console.warn("Failed to sync API key to server, but local storage is active:", syncErr);
+      }
       
       // The user's specific success message
       speak("the key sucessfully copied now you can do your legal works");
@@ -1084,7 +1102,7 @@ export default function AdvocatePortal() {
         undefined, // forcedEngine
         undefined, // imageBase64
         abortControllerRef.current.signal,
-        (status) => setVoiceAiStatus(status)
+        (status) => setVoiceAiStatus(status || "Gemini is thinking...")
       );
       const aiId = localDB.run("INSERT INTO chat_history (role, content, engine) VALUES (?, ?, ?)", ['assistant', response.text, response.engine]);
       setChatHistory(prev => [...prev, { id: aiId || undefined, role: 'assistant', content: response.text, engine: response.engine }]);
@@ -1983,7 +2001,7 @@ export default function AdvocatePortal() {
     isProcessingRef.current = true;
     setView('consult'); // Switch to consult tab automatically
     setVoiceAiThinking(true);
-    setVoiceAiStatus("Initializing...");
+    setVoiceAiStatus("Gemini is initializing...");
     
     // Add user message to history immediately so it shows up in the UI
     const userId = localDB.run("INSERT INTO chat_history (role, content) VALUES (?, ?)", ['user', text]);
@@ -2413,11 +2431,11 @@ export default function AdvocatePortal() {
           </div>
           <div className="flex items-center gap-2 md:gap-8">
             <div className={`px-2 md:px-3 py-1 rounded-full flex items-center gap-1 md:gap-2 text-[8px] md:text-[10px] font-bold uppercase tracking-widest ${
-              isOffline ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'
+              isOffline ? 'bg-rose-500/10 text-rose-500' : 'bg-emerald-500/10 text-emerald-500'
             }`}>
               {isOffline ? <WifiOff size={10} /> : <Wifi size={10} />}
-              <span className="hidden md:inline">{isOffline ? 'Local Mode' : 'Cloud Active'}</span>
-              <span className="md:hidden">{isOffline ? 'Local' : 'Cloud'}</span>
+              <span className="hidden md:inline">{isOffline ? 'System Offline' : 'Nexus Cloud Active'}</span>
+              <span className="md:hidden">{isOffline ? 'Offline' : 'Online'}</span>
             </div>
             <div className="hidden md:block" style={{ width: 1, height: 20, background: 'rgba(255,255,255,.1)' }} />
             <div className="px-2 md:px-3 py-1 bg-white/5 rounded-full flex items-center gap-3 md:gap-4">
@@ -4105,7 +4123,7 @@ export default function AdvocatePortal() {
                     ))}
                   </div>
                   <span style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                    {voiceAiListening ? 'Listening...' : voiceAiThinking ? (voiceAiStatus || 'Thinking...') : voiceAiSpeaking ? 'Speaking...' : 'Nexus AI Ready'}
+                    {voiceAiListening ? 'Listening...' : voiceAiThinking ? (voiceAiStatus || 'Thinking...') : voiceAiSpeaking ? 'Speaking...' : 'Gemini 3 Flash: Active'}
                   </span>
                   
                   {voiceAiListening && (
