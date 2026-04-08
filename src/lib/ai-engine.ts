@@ -148,72 +148,110 @@ export class HybridAIEngine {
   }
 
   private async callGemini(prompt: string, history: AIMessage[], imageBase64?: string, signal?: AbortSignal): Promise<string | null> {
-    // Refresh token before calling if using OAuth
+    // 1. If we have an OAuth access token, we MUST use the server-side proxy 
+    // because client-side OAuth calls to Gemini often hit CORS or auth issues.
     if (this.accessToken) {
-      await this.refreshAccessToken();
-    }
-    
-    if (!this.genAI) return null;
-    try {
-      if (signal?.aborted) return null;
-      console.log("Calling Gemini 2.5 Flash-Live Orchestrator with Web Search...");
-      
-      const sanitizedHistory: any[] = [];
-      let lastRole = '';
-      
-      const historyToProcess = history.filter(m => m.content !== prompt || m !== history[history.length - 1]);
-
-      for (const m of historyToProcess) {
-        const role = m.role === 'assistant' ? 'model' : 'user';
-        if (role === lastRole) continue; 
-        sanitizedHistory.push({
-          role,
-          parts: [{ text: m.content }]
-        });
-        lastRole = role;
-      }
-
-      if (lastRole === 'user' && sanitizedHistory.length > 0) {
-        sanitizedHistory.pop();
-      }
-
-      const contents = [
-        ...sanitizedHistory,
-        {
-          role: 'user',
-          parts: [
-            { text: prompt },
-            ...(imageBase64 ? [{
-              inlineData: {
-                mimeType: "image/jpeg",
-                data: imageBase64.split(',')[1]
-              }
-            }] : [])
-          ]
+      try {
+        console.log("Using BYOK (OAuth) via server-side proxy...");
+        const response = await axios.post('/api/ai/generate', {
+          prompt,
+          history,
+          imageBase64,
+          systemInstruction: "You are the primary AI Orchestrator for Nexus Justice. You handle legal research, drafting, and consultation. You are professional and authoritative."
+        }, { signal });
+        
+        if (response.data && response.data.text) {
+          console.log("Server-side AI proxy responded.");
+          return response.data.text;
         }
-      ];
-
-      // @ts-ignore
-      const response = await this.genAI.models.generateContent({
-        model: "gemini-3-flash-preview",
-        config: {
-          systemInstruction: "You are the primary AI Orchestrator (Gemini 3 Flash) for Nexus Justice. You handle all voice interactions, phone calls to clients, and direct communication with the advocate. You are professional, authoritative, and helpful. You have access to Google Search for real-time information and legal research. Your goal is to provide a seamless, high-performance experience for the advocate.",
-          tools: [{ googleSearch: {} }]
-        },
-        // @ts-ignore
-        contents: contents
-      });
-      
-      console.log("Gemini Orchestrator responded.");
-      return response.text || null;
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        console.log("Gemini request aborted.");
+      } catch (proxyErr) {
+        console.error("Server-side proxy failed for OAuth token:", proxyErr);
+        // If proxy fails for OAuth, we don't have a good fallback because client-side OAuth is unreliable
         return null;
       }
-      console.error("Gemini failed:", err);
-      return null;
     }
+
+    // 2. If we have a direct API key (pasted by user), use the client-side SDK directly.
+    if (this.genAI && !this.accessToken) {
+      try {
+        if (signal?.aborted) return null;
+        console.log("Using BYOK (Pasted Key) via client-side SDK...");
+        
+        const sanitizedHistory: any[] = [];
+        let lastRole = '';
+        
+        const historyToProcess = history.filter(m => m.content !== prompt || m !== history[history.length - 1]);
+
+        for (const m of historyToProcess) {
+          const role = m.role === 'assistant' ? 'model' : 'user';
+          if (role === lastRole) continue; 
+          sanitizedHistory.push({
+            role,
+            parts: [{ text: m.content }]
+          });
+          lastRole = role;
+        }
+
+        if (lastRole === 'user' && sanitizedHistory.length > 0) {
+          sanitizedHistory.pop();
+        }
+
+        const contents = [
+          ...sanitizedHistory,
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              ...(imageBase64 ? [{
+                inlineData: {
+                  mimeType: "image/jpeg",
+                  data: imageBase64.split(',')[1]
+                }
+              }] : [])
+            ]
+          }
+        ];
+
+        // @ts-ignore
+        const response = await this.genAI.models.generateContent({
+          model: "gemini-2.0-flash",
+          config: {
+            systemInstruction: "You are the primary AI Orchestrator for Nexus Justice. You handle legal research, drafting, and consultation. You are professional and authoritative.",
+            tools: [{ googleSearch: {} }]
+          },
+          // @ts-ignore
+          contents: contents
+        });
+        
+        console.log("Client-side Gemini responded.");
+        return response.text || null;
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          console.log("Gemini request aborted.");
+          return null;
+        }
+        console.error("Gemini client-side failed:", err);
+      }
+    }
+
+    // 3. Final fallback: try the proxy anyway (it might have a server-side GEMINI_API_KEY)
+    try {
+      console.log("Attempting final fallback to server-side AI proxy...");
+      const response = await axios.post('/api/ai/generate', {
+        prompt,
+        history,
+        imageBase64,
+        systemInstruction: "You are the primary AI Orchestrator for Nexus Justice. You handle legal research, drafting, and consultation. You are professional and authoritative."
+      }, { signal });
+      
+      if (response.data && response.data.text) {
+        return response.data.text;
+      }
+    } catch (e) {
+      console.error("Final AI fallback failed:", e);
+    }
+
+    return null;
   }
 
   public async generateResponse(

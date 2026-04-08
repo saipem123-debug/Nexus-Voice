@@ -10,10 +10,15 @@ import { OAuth2Client } from "google-auth-library";
 import cookieSession from "cookie-session";
 import db from "./src/lib/server-db.js";
 
+import { GoogleGenAI } from "@google/genai";
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Initialize Gemini on server
+const genAI = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
 
 async function startServer() {
   const app = express();
@@ -215,6 +220,91 @@ async function startServer() {
     } catch (error) {
       console.error("Token refresh error:", error);
       res.status(500).json({ error: "Failed to refresh token" });
+    }
+  });
+
+  app.post("/api/ai/generate", async (req: any, res) => {
+    try {
+      const userId = req.session.userId;
+      let userToken = process.env.GEMINI_API_KEY;
+      let isOAuth = false;
+
+      if (userId) {
+        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+        if (user) {
+          // Check if we need to refresh
+          if (user.refresh_token && (!user.expiry_date || Date.now() >= user.expiry_date - 300000)) {
+            const client = getOAuth2Client();
+            try {
+              client.setCredentials({ refresh_token: user.refresh_token });
+              const { credentials } = await client.refreshAccessToken();
+              db.prepare('UPDATE users SET access_token = ?, expiry_date = ? WHERE id = ?')
+                .run(credentials.access_token, credentials.expiry_date, userId);
+              userToken = credentials.access_token;
+              isOAuth = true;
+            } catch (e) {
+              console.error("Failed to refresh user token for AI call:", e);
+            }
+          } else if (user.access_token) {
+            userToken = user.access_token;
+            isOAuth = true;
+          }
+        }
+      }
+
+      if (!userToken) {
+        return res.status(503).json({ error: "AI Engine not configured. Please log in or set an API key." });
+      }
+
+      const { prompt, history, imageBase64, systemInstruction } = req.body;
+      
+      // Use the appropriate AI instance based on whether we have an OAuth token or API key
+      const aiInstance = isOAuth ? new GoogleGenAI({ apiKey: userToken }) : genAI;
+      
+      if (!aiInstance) {
+        return res.status(503).json({ error: "AI Engine not initialized." });
+      }
+
+      const contents: any[] = [];
+      if (history && Array.isArray(history)) {
+        for (const m of history) {
+          contents.push({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }]
+          });
+        }
+      }
+
+      const userParts: any[] = [{ text: prompt }];
+      if (imageBase64) {
+        userParts.push({
+          inlineData: {
+            mimeType: "image/jpeg",
+            data: imageBase64.split(',')[1]
+          }
+        });
+      }
+
+      contents.push({
+        role: 'user',
+        parts: userParts
+      });
+
+      // @ts-ignore
+      const result = await aiInstance.models.generateContent({
+        model: "gemini-2.0-flash",
+        config: {
+          systemInstruction: systemInstruction || "You are a helpful legal assistant.",
+          tools: [{ googleSearch: {} }]
+        },
+        // @ts-ignore
+        contents: contents
+      });
+
+      res.json({ text: result.text });
+    } catch (error) {
+      console.error("Server AI Error:", error);
+      res.status(500).json({ error: "Failed to generate AI response." });
     }
   });
 
