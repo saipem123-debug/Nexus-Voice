@@ -85,8 +85,12 @@ export class LocalDB {
         case_number TEXT,
         court TEXT,
         next_date TEXT,
-        purpose TEXT
+        purpose TEXT,
+        opp_advocate_name TEXT,
+        opp_advocate_phone TEXT,
+        documents TEXT
       );
+      
       CREATE TABLE IF NOT EXISTS consultations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         client_id INTEGER,
@@ -118,7 +122,27 @@ export class LocalDB {
         image_base64 TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS knowledge_docs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        type TEXT,
+        data TEXT,
+        size TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS instructions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT,
+        active INTEGER DEFAULT 1,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
     `);
+
+    // Migration for existing tables
+    try { this.db.run("ALTER TABLE clients ADD COLUMN opp_advocate_name TEXT;"); } catch(e) {}
+    try { this.db.run("ALTER TABLE clients ADD COLUMN opp_advocate_phone TEXT;"); } catch(e) {}
+    try { this.db.run("ALTER TABLE clients ADD COLUMN documents TEXT;"); } catch(e) {}
+
     this.save();
   }
 
@@ -160,5 +184,17 @@ export class LocalDB {
       console.error("Nexus: SQL Query Error:", e, sql);
       return [];
     }
+  }
+
+  public getConfig(key: string): string | null {
+    const res = this.query("SELECT value FROM config WHERE key = ?", [key]);
+    if (res.length > 0) {
+      return res[0].value;
+    }
+    return null;
+  }
+
+  public setConfig(key: string, value: string) {
+    this.run("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", [key, value]);
   }
 }

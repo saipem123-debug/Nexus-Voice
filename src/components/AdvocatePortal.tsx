@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, Play, Square, Copy, ExternalLink,
   CheckCircle, AlertTriangle, Info, X, Search, Plus, RotateCcw,
   Volume2, Send, Trash, Check, AlertCircle, RefreshCw, Zap, Brain,
-  Maximize2, Minimize2, FileUp, Languages
+  Maximize2, Minimize2, FileUp, Languages, Upload, Archive
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import ReactMarkdown from 'react-markdown';
@@ -102,6 +102,7 @@ export default function AdvocatePortal() {
   const [showTutorial, setShowTutorial] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isDbReady, setIsDbReady] = useState(false);
   const [cloudSync, setCloudSync] = useState(false);
   const [userApiKey, setUserApiKey] = useState("");
   const [isKeyValidating, setIsKeyValidating] = useState(false);
@@ -109,48 +110,7 @@ export default function AdvocatePortal() {
   const [loginError, setLoginError] = useState<string | null>(null);
 
   useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const response = await axios.get('/api/ai/status');
-        setIsLoggedIn(response.data.isLoggedIn);
-        setAiStatus(response.data);
-        
-        const onboardingComplete = localStorage.getItem('onboarding_complete') === 'true';
-        const localKey = localStorage.getItem('nexus_gemini_api_key');
-        const isConfigured = response.data.geminiConfigured || (localKey && localKey !== 'true' && localKey.length > 20);
-        
-        console.log("Nexus Auth Check:", { isLoggedIn: response.data.isLoggedIn, onboardingComplete, isConfigured });
-        
-        if (response.data.isLoggedIn) {
-          setUser({
-            displayName: 'Advocate',
-            email: 'user@nexus.justice',
-            photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
-          });
-          
-          if (onboardingComplete && isConfigured) {
-            setShowOnboarding(false);
-          } else if (isConfigured) {
-            setOnboardingStep(4);
-            setShowOnboarding(true);
-          } else {
-            setOnboardingStep(2);
-            setShowOnboarding(true);
-          }
-        } else {
-          setShowOnboarding(true);
-          setOnboardingStep(1);
-        }
-        setIsAuthReady(true);
-      } catch (err) {
-        console.error("Auth check failed:", err);
-        // If auth check fails, we must force login for safety
-        setShowOnboarding(true);
-        setOnboardingStep(1);
-        setIsAuthReady(true);
-      }
-    };
-    checkAuth();
+    // Auth check moved to init flow below
   }, []);
 
   const handleGoogleLogin = async () => {
@@ -223,6 +183,7 @@ export default function AdvocatePortal() {
       aiEngine.setApiKey(userApiKey.trim());
       
       // Store the key locally
+      localDB.setConfig('gemini_api_key', userApiKey.trim());
       localStorage.setItem('nexus_gemini_api_key', userApiKey.trim());
       localStorage.setItem('onboarding_complete', 'true');
       
@@ -536,7 +497,10 @@ export default function AdvocatePortal() {
   // --- State from Snippet ---
   const [clients, setClients] = useState<any[]>([]);
   const [addingClient, setAddingClient] = useState(false);
-  const [newClient, setNewClient] = useState({ name: '', phone: '', case_number: '', court: '', next_date: '', purpose: '' });
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
+  const [viewingDocsClient, setViewingDocsClient] = useState<any | null>(null);
+  const [newClient, setNewClient] = useState({ name: '', phone: '', case_number: '', court: '', next_date: '', purpose: '', opp_advocate_name: '', opp_advocate_phone: '', documents: [] as any[] });
   const [chatHistory, setChatHistory] = useState<AIMessage[]>([]);
   const [consoleInput, setConsoleInput] = useState("");
   const [consoleLoading, setConsoleLoading] = useState(false);
@@ -708,6 +672,7 @@ export default function AdvocatePortal() {
   ]);
   const [savedDrafts, setSavedDrafts] = useState<any[]>([]);
   const [scannedDocs, setScannedDocs] = useState<any[]>([]);
+  const [uploadedDocs, setUploadedDocs] = useState<any[]>([]);
   const [kbFilter, setKbFilter] = useState('all');
   const [kbSearch, setKbSearch] = useState('');
 
@@ -733,17 +698,65 @@ export default function AdvocatePortal() {
     const init = async () => {
       try {
         await localDB.init();
+        setIsDbReady(true);
+
+        // Check Auth & Configuration after DB is ready
+        const response = await axios.get('/api/ai/status');
+        setIsLoggedIn(response.data.isLoggedIn);
+        setAiStatus(response.data);
+        
+        const onboardingComplete = localStorage.getItem('onboarding_complete') === 'true';
+        const localKey = localStorage.getItem('nexus_gemini_api_key');
+        
+        // Check SQLite for key as well
+        const dbKey = localDB.getConfig('gemini_api_key');
+        if (dbKey && (!localKey || localKey === 'true' || localKey.length < 20)) {
+          localStorage.setItem('nexus_gemini_api_key', dbKey);
+          aiEngine.setApiKey(dbKey);
+        }
+
+        const effectiveKey = (localKey && localKey.length > 20) ? localKey : dbKey;
+        const isConfigured = response.data.geminiConfigured || (effectiveKey && effectiveKey.length > 20);
+        
+        console.log("Nexus Auth Check:", { isLoggedIn: response.data.isLoggedIn, onboardingComplete, isConfigured });
+        
+        if (response.data.isLoggedIn) {
+          setUser({
+            displayName: 'Advocate',
+            email: 'user@nexus.justice',
+            photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
+          });
+          
+          if (onboardingComplete && isConfigured) {
+            setShowOnboarding(false);
+          } else if (isConfigured) {
+            setOnboardingStep(4);
+            setShowOnboarding(true);
+          } else {
+            setOnboardingStep(2);
+            setShowOnboarding(true);
+          }
+        } else {
+          setShowOnboarding(true);
+          setOnboardingStep(1);
+        }
+        setIsAuthReady(true);
+
         const savedClients = localDB.query("SELECT * FROM clients") as any[];
         if (savedClients.length > 0) {
-          setClients(savedClients);
+          const parsedClients = savedClients.map(c => ({
+            ...c,
+            documents: c.documents ? JSON.parse(c.documents) : []
+          }));
+          setClients(parsedClients);
         } else {
           const initial = [
-            { id: 1, name: 'Sreedharan K.', phone: '+91 9876543210', court: 'District Court, Aluva', case_number: 'OS 145/2025', next_date: '2026-03-15', purpose: 'Filing Written Statement' },
-            { id: 2, name: 'Elena Rodriguez', phone: '+1 555-0199', court: 'High Court', case_number: 'WP(C) 204/2026', next_date: '2026-03-20', purpose: 'Hearing' },
+            { id: 1, name: 'Sreedharan K.', phone: '+91 9876543210', court: 'District Court, Aluva', case_number: 'OS 145/2025', next_date: '2026-03-15', purpose: 'Filing Written Statement', opp_advocate_name: 'Adv. Rajan P.', opp_advocate_phone: '+91 9988776655', documents: [] },
+            { id: 2, name: 'Elena Rodriguez', phone: '+1 555-0199', court: 'High Court', case_number: 'WP(C) 204/2026', next_date: '2026-03-20', purpose: 'Hearing', opp_advocate_name: 'Adv. Smith', opp_advocate_phone: '+1 555-0200', documents: [] },
           ];
           initial.forEach(c => {
-            localDB.run("INSERT INTO clients (name, phone, case_number, court, next_date, purpose) VALUES (?, ?, ?, ?, ?, ?)", 
-              [c.name, c.phone, c.case_number, c.court, c.next_date, c.purpose]);
+            localDB.run("INSERT INTO clients (name, phone, case_number, court, next_date, purpose, opp_advocate_name, opp_advocate_phone, documents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+              [c.name, c.phone, c.case_number, c.court, c.next_date, c.purpose, c.opp_advocate_name, c.opp_advocate_phone, JSON.stringify(c.documents)]);
           });
           setClients(initial);
         }
@@ -763,12 +776,18 @@ export default function AdvocatePortal() {
           setScannedDocs(savedScansFromDb);
         }
 
-        const config = localDB.query("SELECT value FROM config WHERE key = 'gemini_api_key'");
-        if (config.length > 0 && config[0].value) {
-          localStorage.setItem('nexus_gemini_api_key', 'true');
+        const savedUploadsFromDb = localDB.query("SELECT * FROM knowledge_docs ORDER BY timestamp DESC") as any[];
+        if (savedUploadsFromDb.length > 0) {
+          setUploadedDocs(savedUploadsFromDb);
+        }
+
+        const savedInstructionsFromDb = localDB.query("SELECT * FROM instructions ORDER BY timestamp DESC") as any[];
+        if (savedInstructionsFromDb.length > 0) {
+          setTempInstructions(savedInstructionsFromDb);
         }
       } catch (err) {
         console.error("Database initialization failed:", err);
+        setIsAuthReady(true);
       }
       
       const checkStatus = async () => {
@@ -806,6 +825,67 @@ export default function AdvocatePortal() {
       window.speechSynthesis.onvoiceschanged = null;
     };
   }, []);
+
+  const handleKbUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const base64Data = event.target?.result as string;
+      const size = (file.size / 1024).toFixed(1) + ' KB';
+      
+      const id = localDB.run(
+        "INSERT INTO knowledge_docs (name, type, data, size) VALUES (?, ?, ?, ?)",
+        [file.name, file.type, base64Data, size]
+      );
+
+      if (id) {
+        const newDoc = { id, name: file.name, type: file.type, data: base64Data, size, timestamp: new Date().toISOString() };
+        setUploadedDocs(prev => [newDoc, ...prev]);
+        setNotifications(prev => [{ id: Date.now(), message: `Document "${file.name}" uploaded to Knowledge Base.`, date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+        speak(`Document ${file.name} successfully uploaded.`);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const deleteKbItem = (type: 'draft' | 'scan' | 'upload', id: number) => {
+    let table = '';
+    if (type === 'draft') table = 'drafts';
+    else if (type === 'scan') table = 'scanned_docs';
+    else if (type === 'upload') table = 'knowledge_docs';
+
+    if (table) {
+      localDB.run(`DELETE FROM ${table} WHERE id = ?`, [id]);
+      if (type === 'draft') setSavedDrafts(prev => prev.filter(d => d.id !== id));
+      else if (type === 'scan') setScannedDocs(prev => prev.filter(d => d.id !== id));
+      else if (type === 'upload') setUploadedDocs(prev => prev.filter(d => d.id !== id));
+      
+      setNotifications(prev => [{ id: Date.now(), message: `Item deleted from Knowledge Base.`, date: new Date().toISOString().split('T')[0], read: false, type: 'info' }, ...prev]);
+      speak("Item deleted successfully.");
+    }
+  };
+
+  const handleAddInstruction = () => {
+    if (!newInstruction.trim()) return;
+    
+    const id = localDB.run("INSERT INTO instructions (text) VALUES (?)", [newInstruction]);
+    if (id) {
+      const newItem = { id, text: newInstruction, timestamp: new Date().toISOString(), active: 1 };
+      setTempInstructions(prev => [newItem, ...prev]);
+      setNewInstruction('');
+      setNotifications(prev => [{ id: Date.now(), message: "New instruction added.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+      speak("Instruction added.");
+    }
+  };
+
+  const deleteInstruction = (id: number) => {
+    localDB.run("DELETE FROM instructions WHERE id = ?", [id]);
+    setTempInstructions(prev => prev.filter(i => i.id !== id));
+    setNotifications(prev => [{ id: Date.now(), message: "Instruction deleted.", date: new Date().toISOString().split('T')[0], read: false, type: 'info' }, ...prev]);
+    speak("Instruction removed.");
+  };
 
   // --- AI Logic ---
   const sendConsult = async (initialText?: string) => {
@@ -846,15 +926,118 @@ export default function AdvocatePortal() {
     }
   };
 
-  const handleAddClient = () => {
-    if (!newClient.name || !newClient.phone) return;
-    const id = localDB.run("INSERT INTO clients (name, phone, case_number, court, next_date, purpose) VALUES (?, ?, ?, ?, ?, ?)", 
-      [newClient.name, newClient.phone, newClient.case_number, newClient.court, newClient.next_date, newClient.purpose]);
-    if (id) {
-      setClients(prev => [...prev, { ...newClient, id }]);
-      setAddingClient(false);
-      setNewClient({ name: '', phone: '', case_number: '', court: '', next_date: '', purpose: '' });
-      setNotifications(prev => [{ id: Date.now(), message: `Client ${newClient.name} added to registry.`, date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+  const handleClientDocUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const doc = {
+      name: file.name,
+      size: (file.size / 1024).toFixed(1) + ' KB',
+      type: file.type,
+      timestamp: new Date().toISOString()
+    };
+    setNewClient(prev => ({ ...prev, documents: [...prev.documents, doc] }));
+  };
+
+  const handleAddClient = async () => {
+    console.log("Nexus: handleAddClient triggered", newClient);
+    if (!newClient.name || !newClient.phone) {
+      setNotifications(prev => [{ 
+        id: Date.now(), 
+        message: "Validation Error: Name and Phone Number are required.", 
+        date: new Date().toISOString().split('T')[0], 
+        read: false, 
+        type: 'error' 
+      }, ...prev]);
+      return;
+    }
+    
+    setIsRegistering(true);
+    
+    // Simulate "entering data" delay for graphic indication
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
+    try {
+      const docsJson = JSON.stringify(newClient.documents);
+      const id = localDB.run("INSERT INTO clients (name, phone, case_number, court, next_date, purpose, opp_advocate_name, opp_advocate_phone, documents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+        [newClient.name, newClient.phone, newClient.case_number, newClient.court, newClient.next_date, newClient.purpose, newClient.opp_advocate_name, newClient.opp_advocate_phone, docsJson]);
+      
+      if (id) {
+        console.log("Nexus: Client registered with ID:", id);
+        setClients(prev => [...prev, { ...newClient, id }]);
+        
+        // Show success overlay
+        setShowSuccessOverlay(true);
+        setTimeout(() => {
+          setShowSuccessOverlay(false);
+          setAddingClient(false);
+          setNewClient({ name: '', phone: '', case_number: '', court: '', next_date: '', purpose: '', opp_advocate_name: '', opp_advocate_phone: '', documents: [] });
+        }, 2000);
+
+        setNotifications(prev => [{ 
+          id: Date.now(), 
+          message: `Success: Client details Entered for ${newClient.name}.`, 
+          date: new Date().toISOString().split('T')[0], 
+          read: false, 
+          type: 'success' 
+        }, ...prev]);
+        
+        confetti({
+          particleCount: 100,
+          spread: 70,
+          origin: { y: 0.6 },
+          colors: ['#6366f1', '#a855f7', '#ec4899']
+        });
+      } else {
+        throw new Error("Failed to insert client into database.");
+      }
+    } catch (err) {
+      console.error("Nexus: handleAddClient Error:", err);
+      setNotifications(prev => [{ 
+        id: Date.now(), 
+        message: "Database Error: Failed to register client. Please try again.", 
+        date: new Date().toISOString().split('T')[0], 
+        read: false, 
+        type: 'error' 
+      }, ...prev]);
+    } finally {
+      setIsRegistering(false);
+    }
+  };
+
+  const handleDeleteDocument = (clientId: number, docId: number) => {
+    const client = clients.find(c => c.id === clientId);
+    if (!client) return;
+
+    const updatedDocs = client.documents.filter((d: any) => d.id !== docId);
+    const docsJson = JSON.stringify(updatedDocs);
+
+    try {
+      localDB.run("UPDATE clients SET documents = ? WHERE id = ?", [docsJson, clientId]);
+      
+      // Update local state
+      setClients(prev => prev.map(c => c.id === clientId ? { ...c, documents: updatedDocs } : c));
+      
+      // Update viewingDocsClient if it's the same client
+      if (viewingDocsClient && viewingDocsClient.id === clientId) {
+        setViewingDocsClient({ ...viewingDocsClient, documents: updatedDocs });
+      }
+
+      setNotifications(prev => [{ 
+        id: Date.now(), 
+        message: "Document deleted successfully.", 
+        date: new Date().toISOString().split('T')[0], 
+        read: false, 
+        type: 'success' 
+      }, ...prev]);
+    } catch (err) {
+      console.error("Nexus: handleDeleteDocument Error:", err);
+      setNotifications(prev => [{ 
+        id: Date.now(), 
+        message: "Error deleting document. Please try again.", 
+        date: new Date().toISOString().split('T')[0], 
+        read: false, 
+        type: 'error' 
+      }, ...prev]);
     }
   };
 
@@ -1951,7 +2134,7 @@ export default function AdvocatePortal() {
       </div>
 
       {/* MAIN */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', paddingBottom: '90px' }}>
 
         {/* Header */}
         <header style={S.header} className="px-4 md:px-6">
@@ -2443,27 +2626,139 @@ export default function AdvocatePortal() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 600 }}>
                     <thead>
                       <tr style={{ borderBottom: '1px solid rgba(255,255,255,.08)' }}>
-                        {['Client', 'Case No.', 'Court', 'Next Date'].map(h => <th key={h} style={{ padding: 12, textAlign: 'left', fontSize: 10, color: '#475569', textTransform: 'uppercase' }}>{h}</th>)}
+                        {['SL No.', 'Client Info', 'Case & Court', 'Opp. Advocate', 'Next Posting', 'Docs'].map(h => <th key={h} style={{ padding: 12, textAlign: 'left', fontSize: 10, color: '#475569', textTransform: 'uppercase' }}>{h}</th>)}
                       </tr>
                     </thead>
                     <tbody>
-                      {clients.map(c => (
+                      {clients.map((c, idx) => (
                         <tr key={c.id} style={{ borderBottom: '1px solid rgba(255,255,255,.04)' }}>
-                          <td style={{ padding: 12 }}>{c.name}</td>
-                          <td style={{ padding: 12 }}><span className="bg-indigo-500/10 text-indigo-400 px-2 py-1 rounded text-xs">{c.case_number}</span></td>
-                          <td style={{ padding: 12, color: '#64748b' }}>{c.court}</td>
-                          <td style={{ padding: 12, color: '#10b981' }}>{c.next_date}</td>
+                          <td style={{ padding: 12, fontSize: 12, color: '#64748b' }}>{idx + 1}</td>
+                          <td style={{ padding: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                              <span style={{ fontWeight: 700, color: '#fff' }}>{c.name}</span>
+                              <span style={{ fontSize: 11, color: '#64748b' }}>{c.phone}</span>
+                            </div>
+                          </td>
+                          <td style={{ padding: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              <span className="bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded text-[10px] w-fit font-bold">{c.case_number}</span>
+                              <span style={{ fontSize: 11, color: '#64748b' }}>{c.court}</span>
+                            </div>
+                          </td>
+                          <td style={{ padding: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                              <span style={{ fontSize: 12, color: '#cbd5e1' }}>{c.opp_advocate_name || 'N/A'}</span>
+                              <span style={{ fontSize: 11, color: '#64748b' }}>{c.opp_advocate_phone}</span>
+                            </div>
+                          </td>
+                          <td style={{ padding: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                              <span style={{ fontSize: 12, color: '#10b981', fontWeight: 700 }}>{c.next_date}</span>
+                              <span style={{ fontSize: 10, color: '#64748b', textTransform: 'uppercase' }}>{c.purpose}</span>
+                            </div>
+                          </td>
+                          <td style={{ padding: 12 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <div style={{ padding: '4px 8px', background: 'rgba(255,255,255,.05)', borderRadius: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <FileText size={12} className="text-slate-400" />
+                                <span style={{ fontSize: 11, color: '#fff' }}>{c.documents?.length || 0}</span>
+                              </div>
+                              {c.documents?.length > 0 && (
+                                <button 
+                                  onClick={() => setViewingDocsClient(c)}
+                                  title="View Documents" 
+                                  style={{ background: 'none', border: 'none', color: '#6366f1', cursor: 'pointer', padding: 4 }}
+                                >
+                                  <ExternalLink size={14} />
+                                </button>
+                              )}
+                            </div>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
 
+                {/* View Documents Modal */}
+                <AnimatePresence>
+                  {viewingDocsClient && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.8)', backdropFilter: 'blur(10px)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+                      <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} style={{ background: '#0a0f1d', border: '1px solid rgba(255,255,255,.1)', borderRadius: 24, padding: 32, width: '100%', maxWidth: 800, maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+                          <div>
+                            <h3 style={{ fontSize: 20, fontWeight: 900, color: '#fff' }}>Client Documents</h3>
+                            <p style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>Viewing documents for {viewingDocsClient.name}</p>
+                          </div>
+                          <button onClick={() => setViewingDocsClient(null)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}><X size={20} /></button>
+                        </div>
+
+                        {viewingDocsClient.documents && viewingDocsClient.documents.length > 0 ? (
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 20 }}>
+                            {viewingDocsClient.documents.map((doc: any) => (
+                              <motion.div 
+                                key={doc.id}
+                                whileHover={{ y: -5 }}
+                                style={{ 
+                                  background: 'rgba(255,255,255,0.03)', 
+                                  border: '1px solid rgba(255,255,255,0.05)', 
+                                  borderRadius: 16, 
+                                  padding: 16,
+                                  position: 'relative',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 12
+                                }}
+                              >
+                                <div style={{ width: '100%', height: 120, background: 'rgba(0,0,0,0.3)', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                                  {doc.type.startsWith('image/') ? (
+                                    <img src={doc.data} alt={doc.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} referrerPolicy="no-referrer" />
+                                  ) : (
+                                    <FileText size={48} color="#6366f1" />
+                                  )}
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                  <p style={{ fontSize: 12, fontWeight: 700, color: '#fff', wordBreak: 'break-all' }}>{doc.name}</p>
+                                  <p style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>{new Date(doc.timestamp).toLocaleDateString()}</p>
+                                </div>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                  <button 
+                                    onClick={() => {
+                                      const link = document.createElement('a');
+                                      link.href = doc.data;
+                                      link.download = doc.name;
+                                      link.click();
+                                    }}
+                                    style={{ flex: 1, padding: '8px', background: 'rgba(99,102,241,0.1)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 8, color: '#6366f1', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+                                  >
+                                    Download
+                                  </button>
+                                  <button 
+                                    onClick={() => handleDeleteDocument(viewingDocsClient.id, doc.id)}
+                                    style={{ padding: '8px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 8, color: '#ef4444', cursor: 'pointer' }}
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              </motion.div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ textAlign: 'center', padding: '40px 0' }}>
+                            <FileText size={48} color="#1e293b" style={{ margin: '0 auto 16px' }} />
+                            <p style={{ color: '#64748b' }}>No documents found for this client.</p>
+                          </div>
+                        )}
+                      </motion.div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
                 {/* Add Client Modal */}
                 <AnimatePresence>
                   {addingClient && (
                     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.8)', backdropFilter: 'blur(10px)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-                      <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} style={{ background: '#0a0f1d', border: '1px solid rgba(255,255,255,.1)', borderRadius: 24, padding: 32, width: '100%', maxWidth: 500, boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)' }}>
+                      <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} style={{ background: '#0a0f1d', border: '1px solid rgba(255,255,255,.1)', borderRadius: 24, padding: 32, width: '100%', maxWidth: 700, maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
                           <h3 style={{ fontSize: 20, fontWeight: 900, color: '#fff' }}>New Client Entry</h3>
                           <button onClick={() => setAddingClient(false)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}><X size={20} /></button>
@@ -2471,7 +2766,7 @@ export default function AdvocatePortal() {
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Full Name</label>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Full Name of Client</label>
                               <input value={newClient.name} onChange={e => setNewClient({...newClient, name: e.target.value})} placeholder="e.g. Rahul Sharma" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
                             </div>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -2485,21 +2780,124 @@ export default function AdvocatePortal() {
                               <input value={newClient.case_number} onChange={e => setNewClient({...newClient, case_number: e.target.value})} placeholder="e.g. OS 123/2026" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
                             </div>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Court Name</label>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Name of Court</label>
                               <input value={newClient.court} onChange={e => setNewClient({...newClient, court: e.target.value})} placeholder="e.g. District Court" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
                             </div>
                           </div>
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Next Hearing Date</label>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Opposite Advocate's Name</label>
+                              <input value={newClient.opp_advocate_name} onChange={e => setNewClient({...newClient, opp_advocate_name: e.target.value})} placeholder="e.g. Adv. Vikram Singh" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Opposite Advocate's Phone</label>
+                              <input value={newClient.opp_advocate_phone} onChange={e => setNewClient({...newClient, opp_advocate_phone: e.target.value})} placeholder="+91 00000 00000" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
+                            </div>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Next Posting Date</label>
                               <input type="date" value={newClient.next_date} onChange={e => setNewClient({...newClient, next_date: e.target.value})} style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
                             </div>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Purpose</label>
+                              <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Purpose / Remarks</label>
                               <input value={newClient.purpose} onChange={e => setNewClient({...newClient, purpose: e.target.value})} placeholder="e.g. Evidence" style={{ background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: 12, color: '#fff', fontSize: 13 }} />
                             </div>
                           </div>
-                          <button onClick={handleAddClient} style={{ marginTop: 12, padding: 16, background: '#6366f1', border: 'none', borderRadius: 14, color: '#fff', fontWeight: 900, fontSize: 14, cursor: 'pointer', boxShadow: '0 10px 20px -5px rgba(99,102,241,0.4)' }}>Register Client</button>
+                          
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            <label style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase' }}>Document Upload</label>
+                            <div style={{ position: 'relative' }}>
+                              <input type="file" onChange={handleClientDocUpload} style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', zIndex: 2 }} />
+                              <div style={{ padding: '16px', background: 'rgba(99,102,241,.05)', border: '1px dashed rgba(99,102,241,.2)', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: '#6366f1' }}>
+                                <FileUp size={16} />
+                                <span style={{ fontSize: 12, fontWeight: 700 }}>Click to upload client documents</span>
+                              </div>
+                            </div>
+                            {newClient.documents.length > 0 && (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                                {newClient.documents.map((d, i) => (
+                                  <div key={i} style={{ padding: '6px 12px', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <FileText size={12} className="text-indigo-400" />
+                                    <span>{d.name}</span>
+                                    <button onClick={() => setNewClient(prev => ({ ...prev, documents: prev.documents.filter((_, idx) => idx !== i) }))} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <motion.button 
+                            whileHover={{ scale: isRegistering ? 1 : 1.02, backgroundColor: isRegistering ? '#6366f1' : '#4f46e5' }}
+                            whileTap={{ scale: isRegistering ? 1 : 0.98 }}
+                            onClick={handleAddClient} 
+                            disabled={isRegistering}
+                            style={{ 
+                              marginTop: 12, 
+                              marginBottom: 20, 
+                              padding: 16, 
+                              background: isRegistering ? '#4338ca' : '#6366f1', 
+                              border: 'none', 
+                              borderRadius: 14, 
+                              color: '#fff', 
+                              fontWeight: 900, 
+                              fontSize: 14, 
+                              cursor: isRegistering ? 'not-allowed' : 'pointer', 
+                              boxShadow: '0 10px 20px -5px rgba(99,102,241,0.4)',
+                              zIndex: 10,
+                              position: 'relative',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: 10
+                            }}
+                          >
+                            {isRegistering ? (
+                              <>
+                                <motion.div 
+                                  animate={{ rotate: 360 }} 
+                                  transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                                  style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%' }}
+                                />
+                                Entering Data...
+                              </>
+                            ) : 'Register Client'}
+                          </motion.button>
+
+                          <AnimatePresence>
+                            {showSuccessOverlay && (
+                              <motion.div 
+                                initial={{ opacity: 0, scale: 0.9 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                exit={{ opacity: 0, scale: 0.9 }}
+                                style={{
+                                  position: 'absolute',
+                                  inset: 0,
+                                  background: 'rgba(0,0,0,0.8)',
+                                  backdropFilter: 'blur(8px)',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  borderRadius: 24,
+                                  zIndex: 100,
+                                  textAlign: 'center',
+                                  padding: 20
+                                }}
+                              >
+                                <motion.div 
+                                  initial={{ scale: 0 }}
+                                  animate={{ scale: 1 }}
+                                  transition={{ type: 'spring', damping: 12 }}
+                                  style={{ width: 64, height: 64, background: '#22c55e', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}
+                                >
+                                  <Check size={32} color="#fff" />
+                                </motion.div>
+                                <h3 style={{ color: '#fff', fontSize: 20, fontWeight: 900, marginBottom: 8 }}>Client details Entered</h3>
+                                <p style={{ color: '#94a3b8', fontSize: 14 }}>The client has been successfully added to the registry.</p>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </div>
                       </motion.div>
                     </motion.div>
@@ -2513,17 +2911,35 @@ export default function AdvocatePortal() {
               <motion.div key="kb" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', overflowY: 'auto', padding: 28 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
                   <h2 style={{ fontSize: 36, fontWeight: 900, fontStyle: 'italic', margin: 0 }}>Law Knowledge Base</h2>
-                  <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                    <label style={{ 
+                      padding: '10px 20px', 
+                      background: '#6366f1', 
+                      borderRadius: 12, 
+                      color: '#fff', 
+                      fontSize: 12, 
+                      fontWeight: 900, 
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      boxShadow: '0 10px 20px -5px rgba(99,102,241,0.4)'
+                    }}>
+                      <Upload size={16} />
+                      UPLOAD DOCUMENT
+                      <input type="file" accept=".zip,application/zip,application/x-zip-compressed,.pdf,.doc,.docx,.txt" hidden onChange={handleKbUpload} />
+                    </label>
                     <div style={{ display: 'flex', background: 'rgba(255,255,255,.05)', borderRadius: 10, padding: 4 }}>
                       <button onClick={() => setKbFilter('all')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'all' ? '#6366f1' : 'transparent', color: kbFilter === 'all' ? '#fff' : '#64748b' }}>ALL</button>
                       <button onClick={() => setKbFilter('acts')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'acts' ? '#6366f1' : 'transparent', color: kbFilter === 'acts' ? '#fff' : '#64748b' }}>ACTS</button>
                       <button onClick={() => setKbFilter('drafts')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'drafts' ? '#6366f1' : 'transparent', color: kbFilter === 'drafts' ? '#fff' : '#64748b' }}>MY DRAFTS</button>
                       <button onClick={() => setKbFilter('scans')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'scans' ? '#6366f1' : 'transparent', color: kbFilter === 'scans' ? '#fff' : '#64748b' }}>SCANS</button>
+                      <button onClick={() => setKbFilter('uploads')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 900, background: kbFilter === 'uploads' ? '#6366f1' : 'transparent', color: kbFilter === 'uploads' ? '#fff' : '#64748b' }}>UPLOADS</button>
                     </div>
                   </div>
                 </div>
 
-                {kbFilter !== 'drafts' && kbFilter !== 'scans' && (
+                {kbFilter !== 'drafts' && kbFilter !== 'scans' && kbFilter !== 'uploads' && (
                   <>
                     <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 16 }}>Legal Acts & References</div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-10">
@@ -2538,6 +2954,51 @@ export default function AdvocatePortal() {
                           </div>
                         </div>
                       ))}
+                    </div>
+                  </>
+                )}
+
+                {(kbFilter === 'all' || kbFilter === 'uploads') && (
+                  <>
+                    <div style={{ fontSize: 10, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 16 }}>Uploaded Documents</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-10">
+                      {uploadedDocs.length === 0 ? (
+                        <div style={{ gridColumn: '1/-1', padding: 40, textAlign: 'center', background: 'rgba(255,255,255,.02)', borderRadius: 20, border: '1px dashed rgba(255,255,255,.05)' }}>
+                          <Upload size={32} style={{ color: '#1e293b', margin: '0 auto 12px' }} />
+                          <div style={{ fontSize: 13, color: '#475569' }}>No uploaded documents yet.</div>
+                        </div>
+                      ) : (
+                        uploadedDocs.map(doc => (
+                          <div key={doc.id} style={{ background: '#0a0f1d', borderRadius: 18, padding: 20, border: '1px solid rgba(255,255,255,.05)', position: 'relative' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                              <div style={{ width: 32, height: 32, borderRadius: 8, background: doc.name.toLowerCase().endsWith('.zip') ? 'rgba(245,158,11,.1)' : 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: doc.name.toLowerCase().endsWith('.zip') ? '#f59e0b' : '#6366f1' }}>
+                                {doc.name.toLowerCase().endsWith('.zip') ? <Archive size={16} /> : <FileText size={16} />}
+                              </div>
+                              <button 
+                                onClick={() => deleteKbItem('upload', doc.id)}
+                                style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 6, wordBreak: 'break-all' }}>{doc.name}</div>
+                            <div style={{ fontSize: 10, color: '#475569' }}>{doc.size} · {new Date(doc.timestamp).toLocaleDateString()}</div>
+                            <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+                              <button 
+                                onClick={() => {
+                                  const link = document.createElement('a');
+                                  link.href = doc.data;
+                                  link.download = doc.name;
+                                  link.click();
+                                }}
+                                style={{ flex: 1, padding: '8px', background: 'rgba(255,255,255,.05)', border: 'none', borderRadius: 8, color: '#cbd5e1', fontSize: 10, fontWeight: 900, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                              >
+                                <Download size={14} /> DOWNLOAD
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
                     </div>
                   </>
                 )}
@@ -2558,7 +3019,12 @@ export default function AdvocatePortal() {
                               <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(16,185,129,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10b981' }}>
                                 <Zap size={16} />
                               </div>
-                              <div style={{ fontSize: 9, color: '#475569', fontWeight: 700 }}>{new Date(draft.timestamp).toLocaleDateString()}</div>
+                              <button 
+                                onClick={() => deleteKbItem('draft', draft.id)}
+                                style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
+                              >
+                                <Trash2 size={14} />
+                              </button>
                             </div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 6 }}>{draft.title}</div>
                             <div style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5, height: 50, overflow: 'hidden', textOverflow: 'ellipsis' }}>{draft.content.slice(0, 150)}...</div>
@@ -2603,7 +3069,12 @@ export default function AdvocatePortal() {
                               <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(16,185,129,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10b981' }}>
                                 <Camera size={16} />
                               </div>
-                              <div style={{ fontSize: 9, color: '#475569', fontWeight: 700 }}>{new Date(scan.timestamp).toLocaleDateString()}</div>
+                              <button 
+                                onClick={() => deleteKbItem('scan', scan.id)}
+                                style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
+                              >
+                                <Trash2 size={14} />
+                              </button>
                             </div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 6 }}>{scan.title}</div>
                             <div style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5, height: 50, overflow: 'hidden', textOverflow: 'ellipsis' }}>{scan.content.slice(0, 150)}...</div>
@@ -2635,14 +3106,48 @@ export default function AdvocatePortal() {
 
             {/* TEMP INSTRUCTIONS */}
             {view === 'temp-instructions' && (
-              <motion.div key="instr" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', padding: 24 }}>
-                <h2 style={{ fontSize: 28, fontWeight: 900, fontStyle: 'italic', marginBottom: 20 }}>Temporary Instructions</h2>
+              <motion.div key="instr" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', padding: 24, overflowY: 'auto' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+                  <h2 style={{ fontSize: 28, fontWeight: 900, fontStyle: 'italic', margin: 0 }}>Temporary Instructions</h2>
+                </div>
+
+                <div style={{ background: 'rgba(255,255,255,.02)', borderRadius: 20, padding: 20, border: '1px solid rgba(255,255,255,.05)', marginBottom: 24 }}>
+                  <div style={{ fontSize: 10, fontWeight: 900, color: '#6366f1', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>Add New Instruction</div>
+                  <div style={{ display: 'flex', gap: 10 }}>
+                    <input 
+                      value={newInstruction}
+                      onChange={(e) => setNewInstruction(e.target.value)}
+                      placeholder="e.g. Tell clients I'm in court until 2 PM..."
+                      style={{ flex: 1, background: '#0a0f1d', border: '1px solid rgba(255,255,255,.1)', borderRadius: 12, padding: '12px 16px', color: '#fff', fontSize: 13 }}
+                    />
+                    <button 
+                      onClick={handleAddInstruction}
+                      style={{ padding: '0 20px', background: '#6366f1', border: 'none', borderRadius: 12, color: '#fff', fontWeight: 900, fontSize: 12, cursor: 'pointer' }}
+                    >
+                      ADD
+                    </button>
+                  </div>
+                </div>
+
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {tempInstructions.map(instr => (
-                    <div key={instr.id} style={{ ...S.card, padding: 16 }}>
-                      <p style={{ margin: 0, fontSize: 13 }}>{instr.text}</p>
+                  {tempInstructions.length === 0 ? (
+                    <div style={{ padding: 40, textAlign: 'center', color: '#475569', fontSize: 13 }}>
+                      No active instructions.
                     </div>
-                  ))}
+                  ) : (
+                    tempInstructions.map(instr => (
+                      <div key={instr.id} style={{ ...S.card, padding: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <p style={{ margin: 0, fontSize: 13, flex: 1 }}>{instr.text}</p>
+                        <button 
+                          onClick={() => deleteInstruction(instr.id)}
+                          style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 8 }}
+                          title="Delete Instruction"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    ))
+                  )}
                 </div>
               </motion.div>
             )}
@@ -3536,16 +4041,19 @@ export default function AdvocatePortal() {
                     Open Google AI Studio
                   </a>
 
-                  <div className="relative">
+                  <div className="relative group">
+                    <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400 mb-3 ml-1">
+                      Paste API Key in the box below:
+                    </label>
                     <input 
                       type="password"
                       value={userApiKey}
                       onChange={(e) => setUserApiKey(e.target.value)}
                       placeholder="Paste your Gemini API Key here..."
-                      className="w-full py-5 px-6 bg-slate-950 border border-white/10 rounded-2xl text-white font-mono text-sm focus:border-indigo-500 outline-none transition-all placeholder:text-slate-700"
+                      className="w-full py-6 px-8 bg-indigo-500/10 border-2 border-indigo-500/40 rounded-3xl text-white font-bold text-lg focus:border-indigo-400 focus:bg-indigo-500/20 outline-none transition-all placeholder:text-indigo-300/30 shadow-[0_0_30px_rgba(99,102,241,0.1)] hover:border-indigo-500/60"
                     />
-                    <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
-                      {userApiKey && <CheckCircle size={18} className="text-emerald-500" />}
+                    <div className="absolute right-6 top-[calc(50%+12px)] -translate-y-1/2 flex items-center gap-2">
+                      {userApiKey && <CheckCircle size={22} className="text-emerald-500" />}
                     </div>
                   </div>
 
