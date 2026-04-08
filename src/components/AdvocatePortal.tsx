@@ -2431,7 +2431,7 @@ export default function AdvocatePortal() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.geminiReady ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
                 <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.geminiReady ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                  Gemini 2.5: {aiStatus.geminiReady ? 'Active' : 'Offline'}
+                  Gemini 3: {aiStatus.geminiReady ? 'Active' : 'Offline'}
                 </span>
               </div>
             </div>
@@ -2723,13 +2723,13 @@ export default function AdvocatePortal() {
                       </div>
                       <div>
                         <h3 style={{ fontSize: 16, fontWeight: 900 }}>AI Orchestrator</h3>
-                        <p style={{ fontSize: 11, color: '#475569' }}>Gemini 2.5 Flash-Live (Sole AI Engine)</p>
+                        <p style={{ fontSize: 11, color: '#475569' }}>Gemini 3 Flash (Sole AI Engine)</p>
                       </div>
                     </div>
                     
                     <div style={{ background: 'rgba(255,255,255,.02)', borderRadius: 16, padding: 20, border: '1px solid rgba(255,255,255,.05)' }}>
                       <p style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.6, margin: 0 }}>
-                        Nexus Justice uses Gemini 2.5 Flash-Live as the sole AI engine for all tasks including voice interactions, client calls, legal research, drafting, and translation. 
+                        Nexus Justice uses Gemini 3 Flash as the sole AI engine for all tasks including voice interactions, client calls, legal research, drafting, and translation. 
                         It provides high-performance, low-latency legal assistance with built-in Google Search capabilities.
                       </p>
                     </div>
@@ -4236,7 +4236,7 @@ export default function AdvocatePortal() {
                 <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
-                      Engine: {activeEngine || (isOffline ? 'None' : 'Gemini 2.5 Flash')}
+                      Engine: {activeEngine || (isOffline ? 'None' : 'Gemini 3 Flash')}
                     </span>
                     {voiceAiSpeaking && (
                       <div style={{ display: 'flex', gap: 2 }}>

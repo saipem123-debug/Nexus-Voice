@@ -288,7 +288,7 @@ async function startServer() {
       
       if (isOAuth) {
         // For OAuth tokens, use the REST API directly as it's more reliable than the SDK for this
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent`;
         const response = await axios.post(url, {
           contents: contents,
           systemInstruction: {
@@ -309,7 +309,7 @@ async function startServer() {
         }
         // @ts-ignore
         const result = await genAI.models.generateContent({
-          model: "gemini-2.0-flash",
+          model: "gemini-3-flash-preview",
           config: {
             systemInstruction: systemInstruction || "You are a helpful legal assistant.",
             tools: [{ googleSearch: {} }]
@@ -323,7 +323,7 @@ async function startServer() {
       res.json({ text });
     } catch (error: any) {
       console.error("Server AI Error:", error.response?.data || error.message || error);
-      const errorMessage = error.response?.data?.error?.message || "Failed to generate AI response.";
+      const errorMessage = error.response?.data?.error?.message || error.message || "Failed to generate AI response.";
       res.status(500).json({ error: errorMessage });
     }
   });

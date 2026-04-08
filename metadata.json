@@ -1,6 +1,6 @@
 {
   "name": "Nexus Justice",
-  "description": "Advanced Legal Portal powered by Gemini 2.5 Flash-Live with integrated Google Search for legal research and drafting.",
+  "description": "Advanced Legal Portal powered by Gemini 3 Flash with integrated Google Search for legal research and drafting.",
   "requestFramePermissions": [
     "camera",
     "microphone"
