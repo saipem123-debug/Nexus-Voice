@@ -235,7 +235,9 @@ async function startServer() {
   app.post("/api/ai/generate", async (req: any, res) => {
     try {
       const userId = req.session.userId;
-      let userToken = process.env.GEMINI_API_KEY;
+      const { prompt, history, imageBase64, systemInstruction, apiKey: bodyApiKey } = req.body;
+      
+      let userToken = bodyApiKey || process.env.GEMINI_API_KEY;
       let isOAuth = false;
 
       if (userId) {
@@ -259,19 +261,20 @@ async function startServer() {
             isOAuth = true;
           }
           
-          // Priority 2: Stored API Key (if no OAuth token)
-          if (!isOAuth && user.gemini_api_key) {
+          // Priority 2: Stored API Key (if no OAuth token and no body key)
+          if (!isOAuth && !bodyApiKey && user.gemini_api_key) {
             userToken = user.gemini_api_key;
             isOAuth = false;
           }
         }
       }
 
-      if (!userToken) {
-        return res.status(503).json({ error: "AI Engine not configured. Please log in or set an API key." });
+      // Final validation: Ensure we have a token that looks valid
+      if (!userToken || (!isOAuth && !userToken.startsWith('AIza'))) {
+        return res.status(503).json({ 
+          error: "AI Engine not configured correctly. Please ensure you have pasted a valid Gemini API key starting with 'AIza' or are logged in with Google." 
+        });
       }
-
-      const { prompt, history, imageBase64, systemInstruction } = req.body;
       
       const contents: any[] = [];
       if (history && Array.isArray(history)) {
@@ -319,11 +322,10 @@ async function startServer() {
         
         text = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       } else {
-        if (!genAI) {
-          return res.status(503).json({ error: "AI Engine not initialized." });
-        }
+        // Use the user's BYOK API key directly (or the system key if provided)
+        const userGenAI = new GoogleGenAI({ apiKey: userToken! });
         // @ts-ignore
-        const result = await genAI.models.generateContent({
+        const result = await userGenAI.models.generateContent({
           model: "gemini-3-flash-preview",
           config: {
             systemInstruction: systemInstruction || "You are a helpful legal assistant.",

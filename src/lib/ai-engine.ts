@@ -164,13 +164,19 @@ export class HybridAIEngine {
     try {
       const systemInstruction = "You are the primary AI Orchestrator for Nexus Justice. You handle legal research, drafting, and consultation. You are professional and authoritative.";
 
+      // Get local API key if available to support unauthenticated BYOK
+      const localDB = LocalDB.getInstance();
+      const config = localDB.query("SELECT value FROM config WHERE key = 'gemini_api_key'");
+      const localApiKey = config.length > 0 ? config[0].value : null;
+
       // Use server proxy for all calls to ensure reliability and bypass CORS/BYOK issues
       console.log("Calling Gemini via server proxy...");
       const proxyResponse = await axios.post('/api/ai/generate', {
         prompt,
         history,
         imageBase64,
-        systemInstruction
+        systemInstruction,
+        apiKey: localApiKey
       }, { signal, timeout: 30000 });
       
       return proxyResponse.data.text || proxyResponse.data.error || null;
