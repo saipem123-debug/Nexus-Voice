@@ -88,7 +88,8 @@ export class LocalDB {
         purpose TEXT,
         opp_advocate_name TEXT,
         opp_advocate_phone TEXT,
-        documents TEXT
+        documents TEXT,
+        is_archived INTEGER DEFAULT 0
       );
       
       CREATE TABLE IF NOT EXISTS consultations (
@@ -113,14 +114,16 @@ export class LocalDB {
         title TEXT,
         content TEXT,
         case_facts TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        is_archived INTEGER DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS scanned_docs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT,
         content TEXT,
         image_base64 TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        is_archived INTEGER DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS knowledge_docs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,7 +131,8 @@ export class LocalDB {
         type TEXT,
         data TEXT,
         size TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        is_archived INTEGER DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS instructions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +146,10 @@ export class LocalDB {
     try { this.db.run("ALTER TABLE clients ADD COLUMN opp_advocate_name TEXT;"); } catch(e) {}
     try { this.db.run("ALTER TABLE clients ADD COLUMN opp_advocate_phone TEXT;"); } catch(e) {}
     try { this.db.run("ALTER TABLE clients ADD COLUMN documents TEXT;"); } catch(e) {}
+    try { this.db.run("ALTER TABLE clients ADD COLUMN is_archived INTEGER DEFAULT 0;"); } catch(e) {}
+    try { this.db.run("ALTER TABLE drafts ADD COLUMN is_archived INTEGER DEFAULT 0;"); } catch(e) {}
+    try { this.db.run("ALTER TABLE scanned_docs ADD COLUMN is_archived INTEGER DEFAULT 0;"); } catch(e) {}
+    try { this.db.run("ALTER TABLE knowledge_docs ADD COLUMN is_archived INTEGER DEFAULT 0;"); } catch(e) {}
 
     this.save();
   }

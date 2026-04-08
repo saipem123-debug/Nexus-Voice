@@ -510,7 +510,33 @@ export default function AdvocatePortal() {
   const [supportMsgs, setSupportMsgs] = useState([{ id: 1, role: 'ai', text: 'Hello. I am the Nexus Support AI. Please describe any issues you are facing with the platform.' }]);
   const [supportInput, setSupportInput] = useState("");
   const [supportLoading, setSupportLoading] = useState(false);
-  
+
+  const sendSupportMessage = async () => {
+    if (!supportInput.trim() || supportLoading) return;
+    const text = supportInput.trim();
+    setSupportInput("");
+    setSupportLoading(true);
+
+    const userMsg = { id: Date.now(), role: 'user', text };
+    setSupportMsgs(prev => [...prev, userMsg]);
+
+    try {
+      const history: AIMessage[] = [
+        { role: 'system', content: 'You are the Nexus Justice Support AI. Help the user with platform issues, technical questions, or legal tool guidance. Keep it professional and helpful.' },
+        ...supportMsgs.map(m => ({ role: m.role === 'ai' ? 'assistant' : 'user', content: m.text } as AIMessage))
+      ];
+
+      const response = await aiEngine.generateResponse(text, history);
+
+      setSupportMsgs(prev => [...prev, { id: Date.now() + 1, role: 'ai', text: response.text }]);
+    } catch (error) {
+      console.error("Support AI failed:", error);
+      setSupportMsgs(prev => [...prev, { id: Date.now() + 1, role: 'ai', text: "I'm having trouble connecting to the support server. Please try again later." }]);
+    } finally {
+      setSupportLoading(false);
+    }
+  };
+
   // Reading Room / OCR
   const [scanPhase, setScanPhase] = useState<'idle' | 'starting' | 'live' | 'processing' | 'done' | 'error'>('idle');
   const [scanProgress, setScanProgress] = useState(0);
@@ -676,6 +702,13 @@ export default function AdvocatePortal() {
   const [kbFilter, setKbFilter] = useState('all');
   const [kbSearch, setKbSearch] = useState('');
 
+  // Archive State
+  const [archivedClients, setArchivedClients] = useState<any[]>([]);
+  const [archivedDrafts, setArchivedDrafts] = useState<any[]>([]);
+  const [archivedScans, setArchivedScans] = useState<any[]>([]);
+  const [archivedUploads, setArchivedUploads] = useState<any[]>([]);
+  const [archiveTab, setArchiveTab] = useState<'clients' | 'drafts' | 'scans' | 'uploads'>('clients');
+
   // Temp Instructions
   const [tempInstructions, setTempInstructions] = useState<any[]>([
     { id: 1, text: 'If Raju calls, tell him to meet me tomorrow at 10 AM.', active: true, created: '2026-03-06 09:00' },
@@ -745,7 +778,7 @@ export default function AdvocatePortal() {
         }
         setIsAuthReady(true);
 
-        const savedClients = localDB.query("SELECT * FROM clients") as any[];
+        const savedClients = localDB.query("SELECT * FROM clients WHERE is_archived = 0") as any[];
         if (savedClients.length > 0) {
           const parsedClients = savedClients.map(c => ({
             ...c,
@@ -764,25 +797,34 @@ export default function AdvocatePortal() {
           setClients(initial);
         }
 
+        const archivedClientsFromDb = localDB.query("SELECT * FROM clients WHERE is_archived = 1") as any[];
+        setArchivedClients(archivedClientsFromDb.map(c => ({
+          ...c,
+          documents: c.documents ? JSON.parse(c.documents) : []
+        })));
+
         const savedHistory = localDB.query("SELECT * FROM chat_history ORDER BY id ASC") as any[];
         if (savedHistory.length > 0) {
           setChatHistory(savedHistory.map(h => ({ id: h.id, role: h.role, content: h.content, engine: h.engine })));
         }
 
-        const savedDraftsFromDb = localDB.query("SELECT * FROM drafts ORDER BY timestamp DESC") as any[];
+        const savedDraftsFromDb = localDB.query("SELECT * FROM drafts WHERE is_archived = 0 ORDER BY timestamp DESC") as any[];
         if (savedDraftsFromDb.length > 0) {
           setSavedDrafts(savedDraftsFromDb);
         }
+        setArchivedDrafts(localDB.query("SELECT * FROM drafts WHERE is_archived = 1 ORDER BY timestamp DESC") as any[]);
 
-        const savedScansFromDb = localDB.query("SELECT * FROM scanned_docs ORDER BY timestamp DESC") as any[];
+        const savedScansFromDb = localDB.query("SELECT * FROM scanned_docs WHERE is_archived = 0 ORDER BY timestamp DESC") as any[];
         if (savedScansFromDb.length > 0) {
           setScannedDocs(savedScansFromDb);
         }
+        setArchivedScans(localDB.query("SELECT * FROM scanned_docs WHERE is_archived = 1 ORDER BY timestamp DESC") as any[]);
 
-        const savedUploadsFromDb = localDB.query("SELECT * FROM knowledge_docs ORDER BY timestamp DESC") as any[];
+        const savedUploadsFromDb = localDB.query("SELECT * FROM knowledge_docs WHERE is_archived = 0 ORDER BY timestamp DESC") as any[];
         if (savedUploadsFromDb.length > 0) {
           setUploadedDocs(savedUploadsFromDb);
         }
+        setArchivedUploads(localDB.query("SELECT * FROM knowledge_docs WHERE is_archived = 1 ORDER BY timestamp DESC") as any[]);
 
         const savedInstructionsFromDb = localDB.query("SELECT * FROM instructions ORDER BY timestamp DESC") as any[];
         if (savedInstructionsFromDb.length > 0) {
@@ -853,21 +895,90 @@ export default function AdvocatePortal() {
     reader.readAsDataURL(file);
   };
 
-  const deleteKbItem = (type: 'draft' | 'scan' | 'upload', id: number) => {
+  const deleteKbItem = (type: 'draft' | 'scan' | 'upload', id: number, permanent = false) => {
     let table = '';
     if (type === 'draft') table = 'drafts';
     else if (type === 'scan') table = 'scanned_docs';
     else if (type === 'upload') table = 'knowledge_docs';
 
     if (table) {
-      localDB.run(`DELETE FROM ${table} WHERE id = ?`, [id]);
-      if (type === 'draft') setSavedDrafts(prev => prev.filter(d => d.id !== id));
-      else if (type === 'scan') setScannedDocs(prev => prev.filter(d => d.id !== id));
-      else if (type === 'upload') setUploadedDocs(prev => prev.filter(d => d.id !== id));
+      if (permanent) {
+        localDB.run(`DELETE FROM ${table} WHERE id = ?`, [id]);
+        if (type === 'draft') setArchivedDrafts(prev => prev.filter(d => d.id !== id));
+        else if (type === 'scan') setArchivedScans(prev => prev.filter(d => d.id !== id));
+        else if (type === 'upload') setArchivedUploads(prev => prev.filter(d => d.id !== id));
+        speak("Item deleted permanently.");
+      } else {
+        localDB.run(`UPDATE ${table} SET is_archived = 1 WHERE id = ?`, [id]);
+        if (type === 'draft') {
+          const item = savedDrafts.find(d => d.id === id);
+          setSavedDrafts(prev => prev.filter(d => d.id !== id));
+          if (item) setArchivedDrafts(prev => [item, ...prev]);
+        } else if (type === 'scan') {
+          const item = scannedDocs.find(d => d.id === id);
+          setScannedDocs(prev => prev.filter(d => d.id !== id));
+          if (item) setArchivedScans(prev => [item, ...prev]);
+        } else if (type === 'upload') {
+          const item = uploadedDocs.find(d => d.id === id);
+          setUploadedDocs(prev => prev.filter(d => d.id !== id));
+          if (item) setArchivedUploads(prev => [item, ...prev]);
+        }
+        speak("Item moved to archive.");
+      }
       
-      setNotifications(prev => [{ id: Date.now(), message: `Item deleted from Knowledge Base.`, date: new Date().toISOString().split('T')[0], read: false, type: 'info' }, ...prev]);
-      speak("Item deleted successfully.");
+      setNotifications(prev => [{ id: Date.now(), message: permanent ? "Item deleted permanently." : "Item moved to archive.", date: new Date().toISOString().split('T')[0], read: false, type: 'info' }, ...prev]);
     }
+  };
+
+  const restoreKbItem = (type: 'draft' | 'scan' | 'upload', id: number) => {
+    let table = '';
+    if (type === 'draft') table = 'drafts';
+    else if (type === 'scan') table = 'scanned_docs';
+    else if (type === 'upload') table = 'knowledge_docs';
+
+    if (table) {
+      localDB.run(`UPDATE ${table} SET is_archived = 0 WHERE id = ?`, [id]);
+      if (type === 'draft') {
+        const item = archivedDrafts.find(d => d.id === id);
+        setArchivedDrafts(prev => prev.filter(d => d.id !== id));
+        if (item) setSavedDrafts(prev => [item, ...prev]);
+      } else if (type === 'scan') {
+        const item = archivedScans.find(d => d.id === id);
+        setArchivedScans(prev => prev.filter(d => d.id !== id));
+        if (item) setScannedDocs(prev => [item, ...prev]);
+      } else if (type === 'upload') {
+        const item = archivedUploads.find(d => d.id === id);
+        setArchivedUploads(prev => prev.filter(d => d.id !== id));
+        if (item) setUploadedDocs(prev => [item, ...prev]);
+      }
+      speak("Item restored from archive.");
+      setNotifications(prev => [{ id: Date.now(), message: "Item restored successfully.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+    }
+  };
+
+  const archiveClient = (id: number) => {
+    localDB.run("UPDATE clients SET is_archived = 1 WHERE id = ?", [id]);
+    const client = clients.find(c => c.id === id);
+    setClients(prev => prev.filter(c => c.id !== id));
+    if (client) setArchivedClients(prev => [client, ...prev]);
+    speak("Client moved to archive.");
+    setNotifications(prev => [{ id: Date.now(), message: "Client archived.", date: new Date().toISOString().split('T')[0], read: false, type: 'info' }, ...prev]);
+  };
+
+  const restoreClient = (id: number) => {
+    localDB.run("UPDATE clients SET is_archived = 0 WHERE id = ?", [id]);
+    const client = archivedClients.find(c => c.id === id);
+    setArchivedClients(prev => prev.filter(c => c.id !== id));
+    if (client) setClients(prev => [client, ...prev]);
+    speak("Client restored from archive.");
+    setNotifications(prev => [{ id: Date.now(), message: "Client restored.", date: new Date().toISOString().split('T')[0], read: false, type: 'success' }, ...prev]);
+  };
+
+  const deleteClientPermanently = (id: number) => {
+    localDB.run("DELETE FROM clients WHERE id = ?", [id]);
+    setArchivedClients(prev => prev.filter(c => c.id !== id));
+    speak("Client deleted permanently.");
+    setNotifications(prev => [{ id: Date.now(), message: "Client deleted permanently.", date: new Date().toISOString().split('T')[0], read: false, type: 'info' }, ...prev]);
   };
 
   const handleAddInstruction = () => {
@@ -2065,7 +2176,7 @@ export default function AdvocatePortal() {
   // --- Sidebar & Tab Config ---
   const sideNav = [
     { id: 'command', label: 'Command', icon: "M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" },
-    { id: 'feed', label: 'Feed', icon: "M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" },
+    { id: 'feed', label: 'Archive', icon: "M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" },
     { id: 'consult', label: 'Consult', icon: "M17 8h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v4l-4-4H9a1.994 1.994 0 01-1.414-.586m0 0L11 14h4a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2v4l.586-.586z" },
     { id: 'clients', label: 'Clients', icon: "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" },
     { id: 'knowledge-base', label: 'Knowledge', icon: "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" },
@@ -2510,26 +2621,85 @@ export default function AdvocatePortal() {
             )}
 
             {/* FEED */}
+            {/* ARCHIVE */}
             {view === 'feed' && (
-              <motion.div key="feed" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', overflowY: 'auto', padding: 24, display: 'flex', gap: 20 }}>
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16 }}>
-                  <div style={S.card}>
-                    <div style={{ fontSize: 9, color: '#f59e0b', fontWeight: 900, letterSpacing: '0.3em', textTransform: 'uppercase', marginBottom: 16 }}>Upcoming Hearings</div>
-                    {clients.slice(0, 3).map(c => (
-                      <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 0', borderBottom: '1px solid rgba(255,255,255,.04)' }}>
-                        <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(99,102,241,.1)', border: '1px solid rgba(99,102,241,.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6366f1', fontWeight: 900, fontSize: 14, flexShrink: 0 }}>{c.name[0]}</div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>{c.name}</div>
-                          <div style={{ fontSize: 11, color: '#475569' }}>{c.case_number} · {c.court}</div>
+              <motion.div key="archive" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} style={{ height: '100%', overflowY: 'auto', padding: 24 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+                  <h2 style={{ fontSize: 32, fontWeight: 900, fontStyle: 'italic', margin: 0 }}>Archive</h2>
+                  <div style={{ display: 'flex', background: 'rgba(255,255,255,.05)', borderRadius: 12, padding: 4 }}>
+                    <button onClick={() => setArchiveTab('clients')} style={{ padding: '8px 16px', borderRadius: 10, fontSize: 11, fontWeight: 900, background: archiveTab === 'clients' ? '#6366f1' : 'transparent', color: archiveTab === 'clients' ? '#fff' : '#64748b' }}>CLIENTS</button>
+                    <button onClick={() => setArchiveTab('drafts')} style={{ padding: '8px 16px', borderRadius: 10, fontSize: 11, fontWeight: 900, background: archiveTab === 'drafts' ? '#6366f1' : 'transparent', color: archiveTab === 'drafts' ? '#fff' : '#64748b' }}>DRAFTS</button>
+                    <button onClick={() => setArchiveTab('scans')} style={{ padding: '8px 16px', borderRadius: 10, fontSize: 11, fontWeight: 900, background: archiveTab === 'scans' ? '#6366f1' : 'transparent', color: archiveTab === 'scans' ? '#fff' : '#64748b' }}>SCANS</button>
+                    <button onClick={() => setArchiveTab('uploads')} style={{ padding: '8px 16px', borderRadius: 10, fontSize: 11, fontWeight: 900, background: archiveTab === 'uploads' ? '#6366f1' : 'transparent', color: archiveTab === 'uploads' ? '#fff' : '#64748b' }}>UPLOADS</button>
+                  </div>
+                </div>
+
+                {archiveTab === 'clients' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {archivedClients.length === 0 ? (
+                      <div style={{ padding: 60, textAlign: 'center', color: '#475569', fontSize: 14 }}>No archived clients.</div>
+                    ) : (
+                      archivedClients.map(c => (
+                        <div key={c.id} style={{ ...S.card, display: 'flex', alignItems: 'center', gap: 16 }}>
+                          <div style={{ width: 44, height: 44, borderRadius: 14, background: 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6366f1', fontWeight: 900 }}>{c.name[0]}</div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 700, fontSize: 14 }}>{c.name}</div>
+                            <div style={{ fontSize: 11, color: '#475569' }}>{c.case_number} · {c.court}</div>
+                          </div>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button onClick={() => restoreClient(c.id)} style={{ padding: '8px 16px', background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 10, color: '#10b981', fontSize: 10, fontWeight: 900, cursor: 'pointer' }}>RESTORE</button>
+                            <button onClick={() => deleteClientPermanently(c.id)} style={{ padding: '8px', background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.2)', borderRadius: 10, color: '#ef4444', cursor: 'pointer' }}><Trash2 size={16} /></button>
+                          </div>
                         </div>
-                        <div style={{ textAlign: 'right' }}>
-                          <div style={{ fontSize: 11, color: '#10b981', fontWeight: 700 }}>{c.next_date}</div>
-                          <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>{c.purpose}</div>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {archiveTab === 'drafts' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 20 }}>
+                    {archivedDrafts.map(d => (
+                      <div key={d.id} style={{ ...S.card, padding: 20 }}>
+                        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>{d.title}</div>
+                        <div style={{ fontSize: 11, color: '#475569', marginBottom: 16 }}>{d.timestamp}</div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button onClick={() => restoreKbItem('draft', d.id)} style={{ flex: 1, padding: '8px', background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 10, color: '#10b981', fontSize: 10, fontWeight: 900 }}>RESTORE</button>
+                          <button onClick={() => deleteKbItem('draft', d.id, true)} style={{ padding: '8px', background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.2)', borderRadius: 10, color: '#ef4444' }}><Trash2 size={16} /></button>
                         </div>
                       </div>
                     ))}
                   </div>
-                </div>
+                )}
+
+                {archiveTab === 'scans' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 20 }}>
+                    {archivedScans.map(s => (
+                      <div key={s.id} style={{ ...S.card, padding: 20 }}>
+                        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>{s.title}</div>
+                        <div style={{ fontSize: 11, color: '#475569', marginBottom: 16 }}>{s.timestamp}</div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button onClick={() => restoreKbItem('scan', s.id)} style={{ flex: 1, padding: '8px', background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 10, color: '#10b981', fontSize: 10, fontWeight: 900 }}>RESTORE</button>
+                          <button onClick={() => deleteKbItem('scan', s.id, true)} style={{ padding: '8px', background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.2)', borderRadius: 10, color: '#ef4444' }}><Trash2 size={16} /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {archiveTab === 'uploads' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 20 }}>
+                    {archivedUploads.map(u => (
+                      <div key={u.id} style={{ ...S.card, padding: 20 }}>
+                        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>{u.name}</div>
+                        <div style={{ fontSize: 11, color: '#475569', marginBottom: 16 }}>{u.size} · {u.timestamp}</div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button onClick={() => restoreKbItem('upload', u.id)} style={{ flex: 1, padding: '8px', background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 10, color: '#10b981', fontSize: 10, fontWeight: 900 }}>RESTORE</button>
+                          <button onClick={() => deleteKbItem('upload', u.id, true)} style={{ padding: '8px', background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.2)', borderRadius: 10, color: '#ef4444' }}><Trash2 size={16} /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </motion.div>
             )}
 
@@ -2629,7 +2799,7 @@ export default function AdvocatePortal() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 600 }}>
                     <thead>
                       <tr style={{ borderBottom: '1px solid rgba(255,255,255,.08)' }}>
-                        {['SL No.', 'Client Info', 'Case & Court', 'Opp. Advocate', 'Next Posting', 'Docs'].map(h => <th key={h} style={{ padding: 12, textAlign: 'left', fontSize: 10, color: '#475569', textTransform: 'uppercase' }}>{h}</th>)}
+                        {['SL No.', 'Client Info', 'Case & Court', 'Opp. Advocate', 'Next Posting', 'Actions'].map(h => <th key={h} style={{ padding: 12, textAlign: 'left', fontSize: 10, color: '#475569', textTransform: 'uppercase' }}>{h}</th>)}
                       </tr>
                     </thead>
                     <tbody>
@@ -2675,6 +2845,13 @@ export default function AdvocatePortal() {
                                   <ExternalLink size={14} />
                                 </button>
                               )}
+                              <button 
+                                onClick={() => archiveClient(c.id)}
+                                title="Archive Client" 
+                                style={{ background: 'none', border: 'none', color: '#f59e0b', cursor: 'pointer', padding: 4 }}
+                              >
+                                <Archive size={14} />
+                              </button>
                             </div>
                           </td>
                         </tr>
@@ -2977,12 +3154,22 @@ export default function AdvocatePortal() {
                               <div style={{ width: 32, height: 32, borderRadius: 8, background: doc.name.toLowerCase().endsWith('.zip') ? 'rgba(245,158,11,.1)' : 'rgba(99,102,241,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: doc.name.toLowerCase().endsWith('.zip') ? '#f59e0b' : '#6366f1' }}>
                                 {doc.name.toLowerCase().endsWith('.zip') ? <Archive size={16} /> : <FileText size={16} />}
                               </div>
-                              <button 
-                                onClick={() => deleteKbItem('upload', doc.id)}
-                                style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
-                              >
-                                <Trash2 size={14} />
-                              </button>
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                <button 
+                                  onClick={() => deleteKbItem('upload', doc.id)}
+                                  style={{ background: 'none', border: 'none', color: '#f59e0b', cursor: 'pointer', padding: 4 }}
+                                  title="Archive Document"
+                                >
+                                  <Archive size={14} />
+                                </button>
+                                <button 
+                                  onClick={() => deleteKbItem('upload', doc.id, true)}
+                                  style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
+                                  title="Delete Permanently"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
                             </div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 6, wordBreak: 'break-all' }}>{doc.name}</div>
                             <div style={{ fontSize: 10, color: '#475569' }}>{doc.size} · {new Date(doc.timestamp).toLocaleDateString()}</div>
@@ -3022,12 +3209,22 @@ export default function AdvocatePortal() {
                               <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(16,185,129,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10b981' }}>
                                 <Zap size={16} />
                               </div>
-                              <button 
-                                onClick={() => deleteKbItem('draft', draft.id)}
-                                style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
-                              >
-                                <Trash2 size={14} />
-                              </button>
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                <button 
+                                  onClick={() => deleteKbItem('draft', draft.id)}
+                                  style={{ background: 'none', border: 'none', color: '#f59e0b', cursor: 'pointer', padding: 4 }}
+                                  title="Archive Draft"
+                                >
+                                  <Archive size={14} />
+                                </button>
+                                <button 
+                                  onClick={() => deleteKbItem('draft', draft.id, true)}
+                                  style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
+                                  title="Delete Permanently"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
                             </div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 6 }}>{draft.title}</div>
                             <div style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5, height: 50, overflow: 'hidden', textOverflow: 'ellipsis' }}>{draft.content.slice(0, 150)}...</div>
@@ -3072,12 +3269,22 @@ export default function AdvocatePortal() {
                               <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(16,185,129,.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10b981' }}>
                                 <Camera size={16} />
                               </div>
-                              <button 
-                                onClick={() => deleteKbItem('scan', scan.id)}
-                                style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
-                              >
-                                <Trash2 size={14} />
-                              </button>
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                <button 
+                                  onClick={() => deleteKbItem('scan', scan.id)}
+                                  style={{ background: 'none', border: 'none', color: '#f59e0b', cursor: 'pointer', padding: 4 }}
+                                  title="Archive Scan"
+                                >
+                                  <Archive size={14} />
+                                </button>
+                                <button 
+                                  onClick={() => deleteKbItem('scan', scan.id, true)}
+                                  style={{ background: 'none', border: 'none', color: '#f43f5e', cursor: 'pointer', padding: 4 }}
+                                  title="Delete Permanently"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
                             </div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginBottom: 6 }}>{scan.title}</div>
                             <div style={{ fontSize: 11, color: '#64748b', lineHeight: 1.5, height: 50, overflow: 'hidden', textOverflow: 'ellipsis' }}>{scan.content.slice(0, 150)}...</div>
@@ -3180,12 +3387,55 @@ export default function AdvocatePortal() {
                   <X size={20} />
                 </button>
                 <h2 style={{ fontSize: 26, fontWeight: 900, fontStyle: 'italic', marginBottom: 20 }}>Help Desk</h2>
-                <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
                   {supportMsgs.map(msg => (
-                    <div key={msg.id} style={{ maxWidth: '80%', padding: 12, borderRadius: 12, background: msg.role === 'ai' ? 'rgba(255,255,255,.03)' : 'rgba(99,102,241,.1)' }}>
-                      <p style={{ margin: 0, fontSize: 13 }}>{msg.text}</p>
+                    <div key={msg.id} style={{ 
+                      maxWidth: '80%', 
+                      padding: 12, 
+                      borderRadius: 16, 
+                      background: msg.role === 'ai' ? 'rgba(255,255,255,.03)' : 'rgba(99,102,241,.1)',
+                      alignSelf: msg.role === 'ai' ? 'flex-start' : 'flex-end',
+                      border: `1px solid ${msg.role === 'ai' ? 'rgba(255,255,255,.05)' : 'rgba(99,102,241,.2)'}`
+                    }}>
+                      <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5 }}>{msg.text}</p>
                     </div>
                   ))}
+                  {supportLoading && (
+                    <div style={{ alignSelf: 'flex-start', padding: 12, background: 'rgba(255,255,255,.03)', borderRadius: 16, display: 'flex', gap: 4 }}>
+                      <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce" />
+                      <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:0.2s]" />
+                      <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:0.4s]" />
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', gap: 10, background: 'rgba(255,255,255,.03)', padding: 8, borderRadius: 20, border: '1px solid rgba(255,255,255,.05)' }}>
+                  <input 
+                    type="text" 
+                    value={supportInput}
+                    onChange={(e) => setSupportInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && sendSupportMessage()}
+                    placeholder="Describe your issue or ask a question..."
+                    style={{ flex: 1, background: 'none', border: 'none', padding: '10px 16px', fontSize: 13 }}
+                  />
+                  <button 
+                    onClick={sendSupportMessage}
+                    disabled={!supportInput.trim() || supportLoading}
+                    style={{ 
+                      width: 40, 
+                      height: 40, 
+                      borderRadius: 14, 
+                      background: supportInput.trim() ? '#6366f1' : 'rgba(255,255,255,.05)', 
+                      color: '#fff', 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'center',
+                      cursor: supportInput.trim() ? 'pointer' : 'default',
+                      transition: 'all .2s'
+                    }}
+                  >
+                    <Send size={18} />
+                  </button>
                 </div>
               </motion.div>
             )}
