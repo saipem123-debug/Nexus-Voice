@@ -716,6 +716,9 @@ export default function AdvocatePortal() {
         }
 
         const effectiveKey = (localKey && localKey.length > 20) ? localKey : dbKey;
+        if (effectiveKey && effectiveKey.length > 20) {
+          aiEngine.setApiKey(effectiveKey);
+        }
         const isConfigured = response.data.geminiConfigured || (effectiveKey && effectiveKey.length > 20);
         
         console.log("Nexus Auth Check:", { isLoggedIn: response.data.isLoggedIn, onboardingComplete, isConfigured });
@@ -726,16 +729,16 @@ export default function AdvocatePortal() {
             email: 'user@nexus.justice',
             photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=advocate'
           });
-          
-          if (onboardingComplete && isConfigured) {
-            setShowOnboarding(false);
-          } else if (isConfigured) {
-            setOnboardingStep(4);
-            setShowOnboarding(true);
-          } else {
-            setOnboardingStep(2);
-            setShowOnboarding(true);
-          }
+        }
+
+        if (onboardingComplete && isConfigured) {
+          setShowOnboarding(false);
+        } else if (isConfigured) {
+          setOnboardingStep(4);
+          setShowOnboarding(true);
+        } else if (response.data.isLoggedIn) {
+          setOnboardingStep(2);
+          setShowOnboarding(true);
         } else {
           setShowOnboarding(true);
           setOnboardingStep(1);
