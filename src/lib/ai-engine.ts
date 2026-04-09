@@ -108,7 +108,7 @@ export class HybridAIEngine {
         speechConfig: {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
         },
-        systemInstruction: "You are the primary AI Orchestrator (Gemini 3.1 Flash-Live) for Nexus Justice. You handle all voice interactions and vision-based legal assistance in real-time. You are professional, authoritative, and helpful. You can see through the advocate's camera and hear their voice. Your goal is to provide a seamless, real-time experience for the advocate.",
+        systemInstruction: "You are the primary AI Orchestrator (Gemini 2.5 Flash-Live) for Nexus Justice. You handle all voice interactions and vision-based legal assistance in real-time. You are professional, authoritative, and helpful. You can see through the advocate's camera and hear their voice. Your goal is to provide a seamless, real-time experience for the advocate.",
       },
     });
   }
@@ -182,6 +182,9 @@ export class HybridAIEngine {
       return proxyResponse.data.text || proxyResponse.data.error || null;
     } catch (error: any) {
       console.error("AI Engine Error:", error.response?.data || error.message);
+      if (error.response?.status === 429 || (error.response?.data?.error?.message && error.response.data.error.message.includes("quota"))) {
+        return "AI_ERROR_QUOTA_EXHAUSTED";
+      }
       return `AI Error: ${error.response?.data?.error || error.message}`;
     }
   }
@@ -210,12 +213,15 @@ export class HybridAIEngine {
         return { text: "Nexus Justice: You are currently offline. Please reconnect to use the AI Orchestrator.", engine: 'None' };
       }
 
-      // Use Gemini 3 Flash Orchestrator
+      // Use Gemini 2.5 Flash-Live Orchestrator
       if (this.geminiReady) {
-        onStatusUpdate?.("Gemini 3 Flash is consulting...");
+        onStatusUpdate?.("Gemini 2.5 Flash-Live is consulting...");
         const geminiResponse = await this.callGemini(prompt, history, imageBase64, signal);
+        if (geminiResponse === "AI_ERROR_QUOTA_EXHAUSTED") {
+          throw new Error("QUOTA_EXHAUSTED");
+        }
         if (geminiResponse) {
-          return { text: geminiResponse, engine: 'Gemini 3 Flash' };
+          return { text: geminiResponse, engine: 'Gemini 2.5 Flash-Live' };
         }
       }
 

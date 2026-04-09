@@ -306,6 +306,16 @@ export default function AdvocatePortal() {
     }
   }, [cloudSync, user]);
 
+  const handleQuotaExceeded = () => {
+    speak("Your Google AI quota has been exceeded. Please enter a new Gemini API key to continue using the platform.");
+    setNotifications(prev => [
+      { id: Date.now(), message: "Quota Exceeded: Please update your Gemini API key.", date: new Date().toISOString().split('T')[0], read: false, type: 'error' },
+      ...prev
+    ]);
+    setOnboardingStep(2);
+    setShowOnboarding(true);
+  };
+
   const speak = (text: string) => {
     if ('speechSynthesis' in window) {
       const utterance = new SpeechSynthesisUtterance(text);
@@ -610,8 +620,12 @@ export default function AdvocatePortal() {
       setSupportMsgs(prev => [...prev, { id: Date.now() + 1, role: 'ai', text: response.text }]);
       speakResponse(response.text);
     } catch (error) {
-      console.error("Support AI failed:", error);
-      setSupportMsgs(prev => [...prev, { id: Date.now() + 1, role: 'ai', text: "I'm having trouble connecting to the support server. Please try again later." }]);
+      if (error instanceof Error && error.message === "QUOTA_EXHAUSTED") {
+        handleQuotaExceeded();
+      } else {
+        console.error("Support AI failed:", error);
+        setSupportMsgs(prev => [...prev, { id: Date.now() + 1, role: 'ai', text: "I'm having trouble connecting to the support server. Please try again later." }]);
+      }
     } finally {
       setSupportLoading(false);
     }
@@ -1108,7 +1122,9 @@ export default function AdvocatePortal() {
       setChatHistory(prev => [...prev, { id: aiId || undefined, role: 'assistant', content: response.text, engine: response.engine }]);
       speakResponse(response.text);
     } catch (err) {
-      if (err instanceof Error && err.message === "Aborted") {
+      if (err instanceof Error && err.message === "QUOTA_EXHAUSTED") {
+        handleQuotaExceeded();
+      } else if (err instanceof Error && err.message === "Aborted") {
         console.log("Consult request aborted");
       } else {
         console.error(err);
@@ -1259,7 +1275,9 @@ export default function AdvocatePortal() {
       setDeskChatHistory(prev => [...prev, { role: 'ai', text: response.text, engine: response.engine }]);
       speakResponse(response.text);
     } catch (err) {
-      if (err instanceof Error && err.message === "Aborted") {
+      if (err instanceof Error && err.message === "QUOTA_EXHAUSTED") {
+        handleQuotaExceeded();
+      } else if (err instanceof Error && err.message === "Aborted") {
         console.log("Desk chat request aborted");
       } else {
         console.error(err);
@@ -1627,8 +1645,12 @@ export default function AdvocatePortal() {
       setWritingDeskPhase('suggestions');
       setShowSuggestionsDropdown(true);
     } catch (err) {
-      console.error(err);
-      setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Drafting failed. Please try again.", engine: 'Error' }]);
+      if (err instanceof Error && err.message === "QUOTA_EXHAUSTED") {
+        handleQuotaExceeded();
+      } else {
+        console.error(err);
+        setDeskChatHistory(prev => [...prev, { role: 'ai', text: "Drafting failed. Please try again.", engine: 'Error' }]);
+      }
     } finally {
       setDeskLoading(false);
       setVoiceAiStatus("");
@@ -2449,7 +2471,7 @@ export default function AdvocatePortal() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span className="pulse-a" style={{ width: 6, height: 6, borderRadius: '50%', background: aiStatus.geminiReady ? '#10b981' : '#f43f5e', display: 'inline-block' }} />
                 <span style={{ fontSize: 9, fontWeight: 900, color: aiStatus.geminiReady ? '#10b981' : '#f43f5e', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                  Gemini 3: {aiStatus.geminiReady ? 'Active' : 'Offline'}
+                  Gemini 2.5: {aiStatus.geminiReady ? 'Active' : 'Offline'}
                 </span>
               </div>
             </div>
@@ -2741,13 +2763,13 @@ export default function AdvocatePortal() {
                       </div>
                       <div>
                         <h3 style={{ fontSize: 16, fontWeight: 900 }}>AI Orchestrator</h3>
-                        <p style={{ fontSize: 11, color: '#475569' }}>Gemini 3 Flash (Sole AI Engine)</p>
+                        <p style={{ fontSize: 11, color: '#475569' }}>Gemini 2.5 Flash-Live (Sole AI Engine)</p>
                       </div>
                     </div>
                     
                     <div style={{ background: 'rgba(255,255,255,.02)', borderRadius: 16, padding: 20, border: '1px solid rgba(255,255,255,.05)' }}>
                       <p style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.6, margin: 0 }}>
-                        Nexus Justice uses Gemini 3 Flash as the sole AI engine for all tasks including voice interactions, client calls, legal research, drafting, and translation. 
+                        Nexus Justice uses Gemini 2.5 Flash-Live as the sole AI engine for all tasks including voice interactions, client calls, legal research, drafting, and translation. 
                         It provides high-performance, low-latency legal assistance with built-in Google Search capabilities.
                       </p>
                     </div>
@@ -4123,7 +4145,7 @@ export default function AdvocatePortal() {
                     ))}
                   </div>
                   <span style={{ fontSize: 10, fontWeight: 900, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                    {voiceAiListening ? 'Listening...' : voiceAiThinking ? (voiceAiStatus || 'Thinking...') : voiceAiSpeaking ? 'Speaking...' : 'Gemini 3 Flash: Active'}
+                    {voiceAiListening ? 'Listening...' : voiceAiThinking ? (voiceAiStatus || 'Thinking...') : voiceAiSpeaking ? 'Speaking...' : 'Gemini 2.5 Flash-Live: Active'}
                   </span>
                   
                   {voiceAiListening && (
@@ -4254,7 +4276,7 @@ export default function AdvocatePortal() {
                 <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ fontSize: 8, color: '#475569', fontWeight: 900, textTransform: 'uppercase' }}>
-                      Engine: {activeEngine || (isOffline ? 'None' : 'Gemini 3 Flash')}
+                      Engine: {activeEngine || (isOffline ? 'None' : 'Gemini 2.5 Flash-Live')}
                     </span>
                     {voiceAiSpeaking && (
                       <div style={{ display: 'flex', gap: 2 }}>
