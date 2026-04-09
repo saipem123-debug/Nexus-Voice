@@ -101,12 +101,14 @@ export class HybridAIEngine {
     if (this.accessToken) await this.refreshAccessToken();
 
     return this.genAI.live.connect({
-      model: "gemini-3.1-flash-live-preview",
+      model: "gemini-2.0-flash-exp",
       callbacks,
       config: {
-        responseModalities: [Modality.AUDIO],
+        generationConfig: {
+          responseModalities: [Modality.AUDIO, Modality.TEXT],
+        },
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } },
         },
         systemInstruction: "You are the primary AI Orchestrator (Gemini 2.5 Flash-Live) for Nexus Justice. You handle all voice interactions and vision-based legal assistance in real-time. You are professional, authoritative, and helpful. You can see through the advocate's camera and hear their voice. Your goal is to provide a seamless, real-time experience for the advocate.",
       },

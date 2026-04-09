@@ -386,11 +386,31 @@ export default function AdvocatePortal() {
         onopen: () => {
           console.log("Live session opened");
           setVoiceAiStatus("Live Active");
+          setVoiceAiListening(true);
           startAudioCapture(session);
           startVideoCapture(session);
         },
         onmessage: (message) => {
+          console.log("Live message received:", message);
+          
+          // Handle User Transcript (STT)
+          if (message.serverContent?.userTurn?.parts) {
+            let userText = "";
+            for (const part of message.serverContent.userTurn.parts) {
+              if (part.text) userText += part.text;
+            }
+            if (userText) {
+              setVoiceAiTranscript(userText);
+              setChatHistory(prev => [...prev, { role: 'user', content: userText }]);
+              setVoiceAiThinking(true);
+            }
+          }
+
+          // Handle AI Response
           if (message.serverContent?.modelTurn?.parts) {
+            setVoiceAiThinking(false);
+            setVoiceAiTranscript("");
+            let fullText = "";
             for (const part of message.serverContent.modelTurn.parts) {
               if (part.inlineData?.data) {
                 const base64Data = part.inlineData.data;
@@ -405,11 +425,29 @@ export default function AdvocatePortal() {
                   playNextAudioChunk();
                 }
               }
+              if (part.text) {
+                fullText += part.text;
+              }
+            }
+            if (fullText) {
+              setChatHistory(prev => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'assistant' && last.engine === 'Gemini 2.5 Flash-Live') {
+                  return [...prev.slice(0, -1), { ...last, content: last.content + fullText }];
+                }
+                return [...prev, { role: 'assistant', content: fullText, engine: 'Gemini 2.5 Flash-Live' }];
+              });
             }
           }
           if (message.serverContent?.interrupted) {
+            setVoiceAiStatus("AI Interrupted");
+            setVoiceAiSpeaking(false);
             audioQueueRef.current = [];
             isPlayingLiveRef.current = false;
+          }
+          if (message.serverContent?.turnComplete) {
+            setVoiceAiStatus("Live Active");
+            setVoiceAiThinking(false);
           }
         },
         onerror: (err) => {
@@ -446,6 +484,9 @@ export default function AdvocatePortal() {
     setAutoStartLive(false); // Disable auto-start if user manually stops
     setIsLiveMode(false);
     setVoiceAiStatus("");
+    setVoiceAiListening(false);
+    setVoiceAiThinking(false);
+    setVoiceAiSpeaking(false);
     if (liveSessionRef.current) {
       liveSessionRef.current.close();
       liveSessionRef.current = null;
@@ -475,9 +516,14 @@ export default function AdvocatePortal() {
           pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
         }
         
-        const base64Data = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+        const bytes = new Uint8Array(pcmData.buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const base64Data = btoa(binary);
         session.sendRealtimeInput({
-          audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+          audio: { data: base64Data, mimeType: 'audio/l16;rate=16000' }
         });
       };
 
@@ -543,10 +589,12 @@ export default function AdvocatePortal() {
   const playNextAudioChunk = () => {
     if (audioQueueRef.current.length === 0) {
       isPlayingLiveRef.current = false;
+      setVoiceAiSpeaking(false);
       return;
     }
 
     isPlayingLiveRef.current = true;
+    setVoiceAiSpeaking(true);
     const pcmData = audioQueueRef.current.shift()!;
     const audioContext = audioContextLiveRef.current;
     if (!audioContext) return;
