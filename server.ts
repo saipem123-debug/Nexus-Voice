@@ -306,7 +306,7 @@ async function startServer() {
       
       if (isOAuth) {
         // For OAuth tokens, use the REST API directly as it's more reliable than the SDK for this
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-04-17:generateContent`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`;
         const response = await axios.post(url, {
           contents: contents,
           systemInstruction: {
@@ -326,7 +326,7 @@ async function startServer() {
         const userGenAI = new GoogleGenAI({ apiKey: userToken! });
         // @ts-ignore
         const result = await userGenAI.models.generateContent({
-          model: "gemini-2.5-flash-preview-04-17",
+          model: "gemini-2.5-flash",
           config: {
             systemInstruction: systemInstruction || "You are a helpful legal assistant.",
             tools: [{ googleSearch: {} }]
